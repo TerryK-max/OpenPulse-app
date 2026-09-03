@@ -1,7 +1,8 @@
 # OpenPulse — application PC (le « mixeur »)
 
-> **Statut : Phase A implémentée** (squelette + transport + GUI minimale — voir
-> §13). Les phases B+ restent à faire. Ce document est le plan cible ; il s'appuie
+> **Statut : Phases A + B implémentées** (transport + télémétrie AC — voir §13).
+> Phase A confirmée sur la box réelle. Phase C (moteur d'effets) à venir. Ce
+> document est le plan cible ; il s'appuie
 > entièrement sur les docs du firmware (dépôt séparé, fourni en référence) :
 > `OpenPulse-firmware/docs/` — `PROTOCOL.md`, `ARCHITECTURE.md`, `HARDWARE.md`,
 > `ROADMAP.md`.
@@ -276,6 +277,7 @@ tanh), `NoiseGate` (hystérésis), `LeakyEnergy` (modèle thermique).
 | `kerb` | évén. | oscillation `susp_travel[essieu]`, pics `load_n`, `off_track_wheels` | oscillation corrélée sur un essieu + sortie partielle | **burst ~45–60 Hz** modulé, intensité = amplitude d'oscillation | gain, seuil, fréquence |
 | `lockup` | évén. | `lock_ratio[avant]`, `brake` | `lock_ratio < seuil` **et** `brake > seuil` | **grind lent ~12–18 Hz**, rugueux | seuil slip, gain, fréquence |
 | `wheelspin` | évén. | `lock_ratio[arrière]`, `throttle`, `slip_ratio` | survitesse roue arrière à l'accélération | **buzz rapide ~25–35 Hz** | seuil, gain, fréquence |
+| `grip_scrub` | lit | `grip_scrub` (dérivé de `nd_slip` / `combined_slip`) | pneus proches du seuil d'adhérence, sans blocage ni patinage franc | **sizzle fin ~20–28 Hz**, monte avec la saturation, avant/arrière séparables | gain, knee (`scrub_nd_lo/hi`), mix avant/arrière |
 | `abs_pulse` | évén. | `abs_active` (UDP) / dérivé (mém.part.), `brake` | flag ABS actif | **pulsation régulière ~15 Hz**, medium | gain, fréquence, source |
 | `tc_cut` | évén. | `tc_active` / slip dérivé | flag TC actif | **saccade ~20 Hz**, faible | gain, fréquence |
 | `impact` | évén. | `jerk_g_s`, `impact_g`, `damage_delta` | `jerk` > seuil ou nouveau dégât | **gros transitoire 40–120 ms**, attaque max, intensité = `|jerk|` | seuil, gain, courbe, cooldown |
@@ -378,6 +380,7 @@ Un seul LRA → impossible de séparer spatialement « kerb avant-gauche » de
 | abs | ~15 Hz, régulier | battement propre |
 | lockup | 12–18 Hz, rugueux | grondement qui traîne |
 | wheelspin | 25–35 Hz, bourdon | frétillement aigu |
+| grip_scrub | 20–28 Hz, granuleux léger | grésillement qui enfle vers le seuil |
 | tc | ~20 Hz | micro-saccade brève |
 | kerb | 45–60 Hz, dur | crépitement |
 | rev-limiter | 7–10 Hz, dur | butée qui tape |
@@ -610,14 +613,33 @@ Style ROADMAP firmware : chaque phase compile, tourne, et a un critère « fait 
 - **Fait** : box (réelle ou mock) pilotée depuis l'app, dashboard live, contrôle
   de version au `PONG` (`ProtocolMismatch`), arrêt propre (`SET_MODE IDLE`).
 
-### Phase B — Télémétrie Assetto Corsa
-- `TelemetryFrame`, `TelemetrySource` ABC + `CapabilitySet`,
-  `ac/shared_memory.py`, `ac/udp.py`, `ac/normalize.py`, `derive.py`.
-- `tools/telemetry_capture.py` + fixtures + `test_ac_*` / `test_normalize` /
-  `test_derive`.
-- GUI : panneau **Moniteur** (télémétrie brute + normalisée).
-- **Fait** : les 2 sources produisent des `TelemetryFrame` équivalents sur une
-  vraie session AC, vérifié sur fixtures.
+### Phase B — Télémétrie Assetto Corsa  —  ✅ FAIT (calibration fixtures en attente)
+- `telemetry/frame.py` (`TelemetryFrame` gelée, ~50 champs SI + `Cap` IntFlag),
+  `telemetry/base.py` (`TelemetrySource` ABC, `SessionInfo`, `SourceStatus`).
+- `telemetry/ac/structs.py` (ctypes, portés de mdjarv (SHM `Pack=4`) + rickwest
+  (UDP `RTCarInfo` 328 o) — tailles/offsets assertés), `ac/shared_memory.py`
+  (mmap `acpmf_*`, Windows), `ac/udp.py` (handshake :9996 + `SUBSCRIBE_UPDATE`,
+  multi-OS), `ac/normalize.py` (le seul module qui connaît les unités d'AC ;
+  hypothèses tagguées `# VERIFY`).
+- `telemetry/derive.py` (`Deriver` : dt, `lock_ratio`, `susp_vel`, jerk/impact,
+  `gear_change`, `rev_limiter`, estimation ABS/TC, **`grip_scrub`**).
+- `telemetry/synthetic.py` (`SyntheticSource` : 6 scénarios dont `grip_scrub`),
+  `telemetry/record.py` (`TelemetryRecorder` JSONL + `ReplaySource`),
+  `telemetry/registry.py` (`build_source` + auto-détection SHM→UDP),
+  `telemetry/controller.py` (`TelemetryController` : thread, snapshot, record).
+- `tools/telemetry_capture.py` (`openpulse-capture`) — dump + rapport de sanity
+  + dump brut `--raw`. `tools/bridge.py` (`openpulse-bridge`) +
+  `debugmap.py` — **pont debug** : streame un scalaire de télémétrie
+  (`grip_scrub`, `lockup`, `rpm`…) directement vers la box.
+- GUI : fenêtre **Telemetry** (source, moniteur temps réel : vitesse, régime,
+  4 roues × 9 métriques, `grip_scrub` en barre, flags ; enregistrement ; pont
+  debug vers la box).
+- Tests : `test_ac_structs`, `test_normalize`, `test_derive`, `test_synthetic`,
+  `test_record`, `test_telemetry_controller`, `test_ac_fixture` (auto-skip).
+- **Reste** : calibration des `# VERIFY` (offset `gear` UDP, axes `accel_g`,
+  unité pression, plage `steerAngle`) et des seuils `grip_scrub` contre une
+  vraie capture AC — voir [TELEMETRY.md](TELEMETRY.md) et
+  `tests/fixtures/README.md`.
 
 ### Phase C — Moteur d'effets v1
 - `Effect` ABC, `dsp.py`, `pipeline.py`, `mixer.py`, les ~11 effets du catalogue,

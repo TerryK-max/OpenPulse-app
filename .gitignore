@@ -19,6 +19,7 @@ venv/
 recordings/
 *.opr
 BENCH-*.md
+*.raw.bin
 
 # editors / OS
 .vscode/

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from openpulse.telemetry.derive import DeriveConfig
 from openpulse.transport import protocol as P
 
 
@@ -58,9 +59,21 @@ class StreamConfig(BaseModel):
     status_hz: float = Field(10.0, gt=0, le=60)
 
 
+class TelemetryConfig(BaseModel):
+    source: str = "auto"  # auto | ac-shm | ac-udp | replay | synthetic
+    udp_host: str = "127.0.0.1"
+    udp_port: int = Field(9996, ge=1, le=65535)
+    replay_path: str = ""
+    scenario: str = "hotlap"
+    poll_hz: float = Field(333.0, ge=30, le=1000)
+    rpm_max_hint: float = Field(0.0, ge=0, le=25000)  # UDP has no maxRpm; set per car
+    derive: DeriveConfig = Field(default_factory=DeriveConfig)
+
+
 class AppSettings(BaseModel):
     transport: str = "usb"  # "usb" | "mock"
     usb_vid: int = 0x1A86
     usb_pid: int = 0x5730
     device: DeviceConfig = Field(default_factory=DeviceConfig)
     stream: StreamConfig = Field(default_factory=StreamConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)

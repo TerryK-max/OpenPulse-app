@@ -26,16 +26,26 @@ def test_gui_builds_and_streams():
     try:
         gui.build()
         dpg.show_viewport()
+        gui.settings.telemetry.source = "synthetic"
+        gui.settings.telemetry.scenario = "grip_scrub"
+        dpg.set_value("tl_source", "synthetic")
+        dpg.set_value("tl_scenario", "grip_scrub")
+        dpg.set_value("tl_bridge_map", "grip_scrub")
         gui.controller.connect_async()
-        for i in range(180):
+        gui._on_telem_start()
+        for i in range(240):
             gui.update()
             dpg.render_dearpygui_frame()
-            if i == 90:
-                gui.controller.start_stream()
-        snap = gui.controller.snapshot()
-        assert snap.status in ("connected", "streaming")
-        assert snap.fw == "0.2"
+            if i == 120:
+                gui._on_bridge()
+        box = gui.controller.snapshot()
+        tel = gui.telem.snapshot()
+        assert box.status in ("connected", "streaming")
+        assert box.fw == "0.2"
+        assert tel.status == "live" and tel.frame is not None
+        assert tel.frame.grip_scrub == tel.frame.grip_scrub  # not NaN
     finally:
         gui.controller.disconnect()
+        gui.telem.stop()
         time.sleep(0.05)
         dpg.destroy_context()

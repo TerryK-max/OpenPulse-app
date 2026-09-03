@@ -6,8 +6,10 @@ thread, and publishes a plain snapshot the GUI polls each frame.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from openpulse.box.session import BoxSession, ProtocolMismatch
@@ -28,7 +30,9 @@ class ControllerSnapshot:
     proto_ok: bool = False
     mode: int = P.MODE_IDLE
     streaming: bool = False
+    stream_kind: str = ""          # "" | "waveform" | "telemetry"
     samples_sent: int = 0
+    bridge_amp: float = math.nan
     stats: P.Stats | None = None
     rtt_ms: tuple[float, ...] = ()
     faults: tuple[str, ...] = ()
@@ -45,6 +49,7 @@ class BoxController:
         self._lock = threading.Lock()
         self._snap = ControllerSnapshot()
         self._ping_nonce = 0
+        self._stream_kind = ""
 
     # -- snapshot ---------------------------------------------------------- #
     def snapshot(self) -> ControllerSnapshot:
@@ -67,13 +72,15 @@ class BoxController:
             proto_ok=bool(st.handshake and st.handshake.proto_version == P.PROTO_VERSION),
             mode=st.mode,
             streaming=streaming,
+            stream_kind=self._stream_kind if streaming else "",
             stats=st.last_stats,
             rtt_ms=tuple(st.rtt_ms),
             faults=tuple(f"{f.name} detail={f.detail}" for f in st.faults),
             logs=tuple(f"[{ln.level_name}] {ln.text}" for ln in st.logs),
             frames_in=st.frames_in,
             frames_out=st.frames_out,
-            samples_sent=self._streamer.samples_sent if self._streamer else 0,
+            samples_sent=getattr(self._streamer, "samples_sent", 0) if self._streamer else 0,
+            bridge_amp=getattr(self._streamer, "current_amp", math.nan) if self._streamer else math.nan,
         )
 
     # -- actions (called from a worker thread) --------------------------- #
@@ -127,12 +134,35 @@ class BoxController:
         self._streamer = SampleStreamer(
             self._session, fn, self.settings.device.sample_rate_hz, self.settings.stream
         )
+        self._stream_kind = "waveform"
         self._streamer.start()
+
+    def start_telemetry_bridge(
+        self,
+        frame_getter: Callable[[], object],
+        amp_fn: Callable[[object], float],
+    ) -> None:
+        """Phase-B debug: stream one telemetry-derived scalar to the box."""
+        from openpulse.streamer import TelemetryMapStreamer
+
+        if self._session is None or self._streamer is not None:
+            return
+        self._streamer = TelemetryMapStreamer(
+            self._session, frame_getter, amp_fn,  # type: ignore[arg-type]
+            self.settings.device.sample_rate_hz, self.settings.stream,
+        )
+        self._stream_kind = "telemetry"
+        self._streamer.start()
+
+    def set_bridge_amp_fn(self, amp_fn: Callable[[object], float]) -> None:
+        if self._streamer is not None and hasattr(self._streamer, "set_amp_fn"):
+            self._streamer.set_amp_fn(amp_fn)  # type: ignore[attr-defined]
 
     def stop_stream(self) -> None:
         if self._streamer is not None:
             self._streamer.stop()
             self._streamer = None
+        self._stream_kind = ""
         if self._session is not None:
             self._session.set_mode(P.MODE_IDLE)
 
