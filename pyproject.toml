@@ -1,0 +1,40 @@
+[project]
+name = "openpulse"
+version = "0.1.0"
+description = "OpenPulse — PC bridge between sim-racing telemetry and the OpenPulse haptic box"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "pyusb>=1.2",
+    "libusb-package>=1.0.26",  # bundles a libusb-1.0 backend (Win/Linux/macOS)
+    "dearpygui>=1.11",
+    "numpy>=1.26",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+openpulse = "openpulse.app:main"
+openpulse-cli = "openpulse.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openpulse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
