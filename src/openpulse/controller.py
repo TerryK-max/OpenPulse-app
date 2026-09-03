@@ -30,7 +30,8 @@ class ControllerSnapshot:
     proto_ok: bool = False
     mode: int = P.MODE_IDLE
     streaming: bool = False
-    stream_kind: str = ""          # "" | "waveform" | "telemetry"
+    stream_kind: str = ""          # "" | "waveform" | "telemetry" | "engine"
+    stream_error: str = ""
     samples_sent: int = 0
     bridge_amp: float = math.nan
     stats: P.Stats | None = None
@@ -92,6 +93,7 @@ class BoxController:
             frames_out=st.frames_out,
             samples_sent=getattr(self._streamer, "samples_sent", 0) if self._streamer else 0,
             bridge_amp=getattr(self._streamer, "current_amp", math.nan) if self._streamer else math.nan,
+            stream_error=getattr(self._streamer, "error", None) or "" if self._streamer else "",
         )
 
     # -- actions (called from a worker thread) --------------------------- #
@@ -174,8 +176,12 @@ class BoxController:
         from openpulse.engine.pipeline import Pipeline
         from openpulse.streamer import PipelineStreamer
 
-        if self._session is None or self._streamer is not None:
+        if self._session is None:
+            self._set(status="error", detail="connect the box first (Connection panel)")
             return
+        if self._streamer is not None:      # replace whatever was streaming
+            self._streamer.stop()
+            self._streamer = None
         self._pipeline = Pipeline(self.settings.engine)
         self._streamer = PipelineStreamer(
             self._session, self._pipeline, frame_getter,  # type: ignore[arg-type]

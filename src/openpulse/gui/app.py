@@ -271,10 +271,15 @@ class OpenPulseGui:
                     build_param_editor(model, f"fx_{cls.id}", width=210)
 
     def _build_mixer(self) -> None:
-        with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=250):
+        with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=270):
+            dpg.add_checkbox(
+                label="bench mode (run even when not on track)", tag="mx_force",
+                default_value=self.settings.engine.force_enable,
+                callback=lambda: setattr(self.settings.engine, "force_enable", dpg.get_value("mx_force")),
+            )
             build_param_editor(self.settings.engine.mixer, "mx", skip=(), width=210)
             dpg.add_separator()
-            dpg.add_text("-", tag="mx_status")
+            dpg.add_text("-", tag="mx_status", wrap=360)
             dpg.add_text("output")
             dpg.add_progress_bar(tag="mx_vu", width=340)
             with dpg.plot(tag="mx_scope", height=90, width=340, no_menus=True):
@@ -305,11 +310,12 @@ class OpenPulseGui:
             f"fw {snap.fw}  ·  proto v{P.PROTO_VERSION} {'OK' if snap.proto_ok else 'MISMATCH'}  ·  "
             f"mode {P.MODE_NAME.get(snap.mode, snap.mode)}" if snap.fw else "",
         )
-        dpg.set_value(
-            "stream_status",
-            f"stream: {snap.stream_kind or 'idle'}  sent={snap.samples_sent}  "
-            f"out={snap.frames_out} in={snap.frames_in}",
-        )
+        ss = (f"stream: {snap.stream_kind or 'idle'}  sent={snap.samples_sent}  "
+              f"out={snap.frames_out} in={snap.frames_in}")
+        if snap.stream_error:
+            ss += f"\n!! streamer error: {snap.stream_error}"
+        dpg.set_value("stream_status", ss)
+        dpg.configure_item("stream_status", color=(230, 110, 110) if snap.stream_error else (200, 200, 200))
         st = snap.stats
         for key, _ in _STAT_ROWS:
             dpg.set_value(f"stat_{key}", str(getattr(st, key)) if st else "-")
@@ -365,14 +371,25 @@ class OpenPulseGui:
     def _update_engine(self) -> None:
         pipe = self.controller.pipeline()
         if pipe is None:
-            dpg.set_value("mx_status", "engine idle")
+            dpg.set_value("mx_status", "engine not running — Connect the box, Start telemetry, "
+                                       "then 'Effect engine'")
             dpg.set_value("mx_vu", 0.0)
             return
         m = pipe.meters()
         dpg.set_value("mx_vu", m.output_peak)
+        why = ""
+        if m.enable < 0.05:
+            f = self.telem.snapshot().frame
+            if not m.telemetry_fresh:
+                why = "  <- no fresh telemetry"
+            elif f is not None and not f.on_track:
+                why = "  <- car not on track (use bench mode to override)"
+            else:
+                why = "  <- output near zero (car stopped?)"
         dpg.set_value(
             "mx_status",
-            f"peak {m.output_peak:.2f}  rms {m.output_rms:.2f}  enable {m.enable:.2f}  "
+            f"blocks {m.blocks}  peak {m.output_peak:.2f}  rms {m.output_rms:.2f}  "
+            f"enable {m.enable:.2f}{why}\n"
             f"duck {m.duck_gain:.2f}  gate {m.gate_gain:.2f}  "
             f"thermal {m.thermal_gain:.2f} (E {m.thermal_energy:.3f})"
             + ("" if m.telemetry_fresh else "  [telemetry stale]"),

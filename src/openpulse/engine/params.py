@@ -186,3 +186,4 @@ class EngineConfig(_Base):
     mixer: MixerParams = Field(default_factory=MixerParams)
     stale_ms: float = Field(250.0, gt=0)       # no fresh frame this long -> ramp to 0
     enable_ramp_ms: float = Field(180.0, gt=0)
+    force_enable: bool = False                 # bench mode: run even off-track / stale

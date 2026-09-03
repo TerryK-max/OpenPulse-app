@@ -21,13 +21,15 @@ class EngineRpmEffect(Effect):
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame
         p = self.p
-        if not (f.on_track and not f.paused) or f.speed_ms < 0.5:
+        if f.paused or f.rpm <= 0:
             lvl = self._level.step(0.0, ctx.dt)
             return EffectBlock(signal=np.zeros(ctx.n, np.float32), level=lvl)
 
         rpm_norm = 0.0
         if f.rpm_max > 0:
             rpm_norm = max(0.0, min(1.2, f.rpm / f.rpm_max))
+        elif f.rpm > 0:
+            rpm_norm = max(0.0, min(1.2, f.rpm / 8000.0))
         freq = self._freq.step(p.freq_lo_hz + rpm_norm * (p.freq_hi_hz - p.freq_lo_hz), ctx.dt)
         target = min(p.ceiling, (p.floor + f.throttle * p.throttle_gain + rpm_norm * p.rpm_gain) * p.gain)
         lvl = self._level.step(target, ctx.dt)

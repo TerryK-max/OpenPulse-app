@@ -222,6 +222,7 @@ class PipelineStreamer:
         self._stop = threading.Event()
         self._i = 0
         self._rng = None
+        self.error: str | None = None
 
     @property
     def running(self) -> bool:
@@ -267,24 +268,29 @@ class PipelineStreamer:
         lookahead = max(batch, int(self._cfg.lookahead_ms * self._rate / 1000))
         pacer = Pacer(self._rate, lookahead)
         status_period = 1.0 / self._cfg.status_hz
-
-        with high_res_timers():
-            self._session.set_mode(P.MODE_SAMPLES)
-            self._i = 0
-            while self._i < lookahead and not self._stop.is_set():
-                self._session.send_samples(self._block(batch))
-                self._i += batch
-                time.sleep(0.001)
-
-            pacer.start()
-            next_status = time.perf_counter()
-            while not self._stop.is_set():
-                now = time.perf_counter()
-                target = pacer.target_index(now)
-                while self._i < target and not self._stop.is_set():
+        try:
+            with high_res_timers():
+                self._session.set_mode(P.MODE_SAMPLES)
+                self._i = 0
+                while self._i < lookahead and not self._stop.is_set():
                     self._session.send_samples(self._block(batch))
                     self._i += batch
-                if now >= next_status:
-                    self._session.request_status()
-                    next_status += status_period
-                time.sleep(0.002)
+                    time.sleep(0.001)
+
+                pacer.start()
+                next_status = time.perf_counter()
+                while not self._stop.is_set():
+                    now = time.perf_counter()
+                    target = pacer.target_index(now)
+                    while self._i < target and not self._stop.is_set():
+                        self._session.send_samples(self._block(batch))
+                        self._i += batch
+                    if now >= next_status:
+                        self._session.request_status()
+                        next_status += status_period
+                    time.sleep(0.002)
+        except Exception as e:  # noqa: BLE001 - surfaced to the GUI, not swallowed
+            self.error = f"{type(e).__name__}: {e}"
+            import traceback
+
+            traceback.print_exc()

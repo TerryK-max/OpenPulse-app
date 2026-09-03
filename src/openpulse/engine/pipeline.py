@@ -77,7 +77,12 @@ class Pipeline:
             frame_at = self._frame_at
         fresh = frame is not None and (time.perf_counter() - frame_at) * 1000.0 <= self.cfg.stale_ms
         use = frame if (frame is not None) else _IDLE_FRAME
-        want_enable = 1.0 if (fresh and use.on_track and not use.paused) else 0.0
+        live = fresh and use.on_track and not use.paused
+        if self.cfg.force_enable and not live:
+            # bench mode: run the effects against whatever telemetry we have
+            from dataclasses import replace as _replace
+            use = _replace(use, on_track=True, paused=False)
+        want_enable = 1.0 if (live or self.cfg.force_enable) else 0.0
 
         dt = n / fs
         ramp = dt / max(1e-3, self.cfg.enable_ramp_ms / 1000.0)
