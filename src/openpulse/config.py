@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from openpulse.engine.params import EngineConfig
 from openpulse.telemetry.derive import DeriveConfig
 from openpulse.transport import protocol as P
 
@@ -54,9 +55,10 @@ class StreamConfig(BaseModel):
     """PC-side streaming parameters (renderer / pacing)."""
 
     waveform: str = "sim"
-    batch: int = Field(8, ge=1, le=P.PROTO_MAX_PAYLOAD)
+    batch: int = Field(12, ge=1, le=P.PROTO_MAX_PAYLOAD)
     lookahead_ms: int = Field(20, ge=4, le=80)
     status_hz: float = Field(10.0, gt=0, le=60)
+    dither: bool = False
 
 
 class TelemetryConfig(BaseModel):
@@ -77,3 +79,4 @@ class AppSettings(BaseModel):
     device: DeviceConfig = Field(default_factory=DeviceConfig)
     stream: StreamConfig = Field(default_factory=StreamConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    engine: EngineConfig = Field(default_factory=EngineConfig)

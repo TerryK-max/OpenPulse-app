@@ -194,3 +194,97 @@ class TelemetryMapStreamer:
                     self._session.request_status()
                     next_status += status_period
                 time.sleep(0.002)
+
+
+# --------------------------------------------------------------------------- #
+class PipelineStreamer:
+    """Streams the effect engine's output to the box: pulls the latest telemetry
+    frame each block, feeds the Pipeline, quantizes to int8, paces the send
+    exactly like SampleStreamer."""
+
+    def __init__(
+        self,
+        session: BoxSession,
+        pipeline,  # openpulse.engine.Pipeline
+        frame_getter: Callable[[], TelemetryFrame | None],
+        rate_hz: int,
+        cfg: StreamConfig,
+        *,
+        dither: bool = False,
+    ):
+        self._session = session
+        self._pipeline = pipeline
+        self._get = frame_getter
+        self._rate = rate_hz
+        self._cfg = cfg
+        self._dither = dither
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._i = 0
+        self._rng = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def samples_sent(self) -> int:
+        return self._i
+
+    @property
+    def current_amp(self) -> float:
+        return float(self._pipeline.meters().output_peak)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        import numpy as np
+
+        self._rng = np.random.default_rng(1)
+        self._pipeline.reset()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="pipeline-streamer", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    def _block(self, n: int) -> bytes:
+        import numpy as np
+
+        self._pipeline.set_frame(self._get())
+        sig = self._pipeline.generate(n, self._rate)
+        x = np.clip(sig, 0.0, 1.0) * 127.0
+        if self._dither:
+            x = x + (self._rng.random(n) - 0.5)
+        return np.clip(np.round(x), 0, 127).astype(np.uint8).tobytes()
+
+    def _run(self) -> None:
+        batch = self._cfg.batch
+        lookahead = max(batch, int(self._cfg.lookahead_ms * self._rate / 1000))
+        pacer = Pacer(self._rate, lookahead)
+        status_period = 1.0 / self._cfg.status_hz
+
+        with high_res_timers():
+            self._session.set_mode(P.MODE_SAMPLES)
+            self._i = 0
+            while self._i < lookahead and not self._stop.is_set():
+                self._session.send_samples(self._block(batch))
+                self._i += batch
+                time.sleep(0.001)
+
+            pacer.start()
+            next_status = time.perf_counter()
+            while not self._stop.is_set():
+                now = time.perf_counter()
+                target = pacer.target_index(now)
+                while self._i < target and not self._stop.is_set():
+                    self._session.send_samples(self._block(batch))
+                    self._i += batch
+                if now >= next_status:
+                    self._session.request_status()
+                    next_status += status_period
+                time.sleep(0.002)

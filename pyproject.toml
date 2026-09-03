@@ -22,6 +22,7 @@ openpulse-cli = "openpulse.cli:main"
 openpulse-bridge = "openpulse.tools.bridge:main"
 openpulse-capture = "openpulse.tools.telemetry_capture:main"
 openpulse-analyze = "openpulse.tools.analyze:main"
+openpulse-preview = "openpulse.tools.preview:main"
 
 [build-system]
 requires = ["hatchling"]

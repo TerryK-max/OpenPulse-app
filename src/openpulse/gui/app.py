@@ -16,6 +16,8 @@ from openpulse import __version__
 from openpulse.config import AppSettings
 from openpulse.controller import BoxController
 from openpulse.debugmap import DEBUG_MAPS
+from openpulse.engine.registry import EFFECT_CLASSES
+from openpulse.gui.paramedit import build_param_editor
 from openpulse.telemetry.controller import TelemetryController
 from openpulse.telemetry.frame import WHEELS, Cap
 from openpulse.telemetry.registry import SOURCE_KINDS
@@ -123,11 +125,17 @@ class OpenPulseGui:
         self._bridge_on = True
         self.controller.start_telemetry_bridge(self.telem.latest_frame, self._bridge_amp_fn())
 
+    def _on_engine(self) -> None:
+        self._bridge_on = False
+        self.controller.start_engine(self.telem.latest_frame)
+
     # -- build ---------------------------------------------------------- #
     def build(self) -> None:
         self._build_connection()
         self._build_diagnostics()
         self._build_telemetry()
+        self._build_effects()
+        self._build_mixer()
 
     def _build_connection(self) -> None:
         with dpg.window(tag="connection", label="Connection (box)", pos=(8, 8), width=460, height=330):
@@ -235,16 +243,51 @@ class OpenPulseGui:
 
             dpg.add_separator()
             with dpg.group(horizontal=True):
-                dpg.add_text("Debug bridge -> box:")
-                dpg.add_combo(list(DEBUG_MAPS), tag="tl_bridge_map", width=140, default_value="grip_scrub")
-                dpg.add_button(label="Bridge to box", callback=self._on_bridge)
-                dpg.add_button(label="Stop bridge", callback=self._on_stop_stream)
+                dpg.add_text("-> box:")
+                dpg.add_button(label="Effect engine", callback=self._on_engine)
+                dpg.add_text("   or debug bridge:")
+                dpg.add_combo(list(DEBUG_MAPS), tag="tl_bridge_map", width=130, default_value="grip_scrub")
+                dpg.add_button(label="one scalar", callback=self._on_bridge)
+                dpg.add_button(label="Stop", callback=self._on_stop_stream)
             dpg.add_progress_bar(tag="tl_bridge_amp", width=400)
+
+    def _build_effects(self) -> None:
+        eff = self.settings.engine.effects
+        with dpg.window(tag="effects", label="Effects", pos=(916, 8), width=390, height=560):
+            dpg.add_text("value after each name = live contribution meter (0..1)",
+                         color=(150, 150, 150), wrap=370)
+            for cls in EFFECT_CLASSES:
+                model = getattr(eff, cls.id)
+                with dpg.collapsing_header(label=f"{cls.id}  ({cls.kind})", tag=f"fx_hdr_{cls.id}"):
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(
+                            label="on", tag=f"fx_{cls.id}__enabled", default_value=model.enabled,
+                            callback=lambda s, a, u, m=model, t=f"fx_{cls.id}__enabled": setattr(
+                                m, "enabled", dpg.get_value(t)),
+                        )
+                        dpg.add_button(label="Test", callback=lambda s, a, u, cid=cls.id:
+                                       self.controller.trigger_effect_test(cid))
+                        dpg.add_text("-", tag=f"fx_meter_{cls.id}")
+                    build_param_editor(model, f"fx_{cls.id}", width=210)
+
+    def _build_mixer(self) -> None:
+        with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=250):
+            build_param_editor(self.settings.engine.mixer, "mx", skip=(), width=210)
+            dpg.add_separator()
+            dpg.add_text("-", tag="mx_status")
+            dpg.add_text("output")
+            dpg.add_progress_bar(tag="mx_vu", width=340)
+            with dpg.plot(tag="mx_scope", height=90, width=340, no_menus=True):
+                dpg.add_plot_axis(dpg.mvXAxis, no_tick_labels=True, tag="mx_x")
+                dpg.add_plot_axis(dpg.mvYAxis, tag="mx_y")
+                dpg.set_axis_limits("mx_y", 0.0, 1.0)
+                dpg.add_line_series([], [], parent="mx_y", tag="mx_series")
 
     # -- per-frame update --------------------------------------------- #
     def update(self) -> None:
         self._update_box()
         self._update_telem()
+        self._update_engine()
         if self._bridge_on:
             self.controller.set_bridge_amp_fn(self._bridge_amp_fn())
 
@@ -319,10 +362,34 @@ class OpenPulseGui:
             for i in range(4):
                 dpg.set_value(f"tw_{key}_{i}", _fmt(vals[i]))
 
+    def _update_engine(self) -> None:
+        pipe = self.controller.pipeline()
+        if pipe is None:
+            dpg.set_value("mx_status", "engine idle")
+            dpg.set_value("mx_vu", 0.0)
+            return
+        m = pipe.meters()
+        dpg.set_value("mx_vu", m.output_peak)
+        dpg.set_value(
+            "mx_status",
+            f"peak {m.output_peak:.2f}  rms {m.output_rms:.2f}  enable {m.enable:.2f}  "
+            f"duck {m.duck_gain:.2f}  gate {m.gate_gain:.2f}  "
+            f"thermal {m.thermal_gain:.2f} (E {m.thermal_energy:.3f})"
+            + ("" if m.telemetry_fresh else "  [telemetry stale]"),
+        )
+        for cid, lvl in m.effect_levels.items():
+            if dpg.does_item_exist(f"fx_meter_{cid}"):
+                dpg.set_value(f"fx_meter_{cid}", f"{lvl:.2f}")
+        hist = pipe.history()
+        if hist:
+            n = len(hist)
+            dpg.set_value("mx_series", [list(range(n)), hist])
+            dpg.set_axis_limits("mx_x", 0, max(64, n))
+
     # -- run ---------------------------------------------------------- #
     def run(self) -> None:
         dpg.create_context()
-        dpg.create_viewport(title=f"OpenPulse {__version__}", width=920, height=828)
+        dpg.create_viewport(title=f"OpenPulse {__version__}", width=1320, height=860)
         dpg.setup_dearpygui()
         self.build()
         dpg.show_viewport()

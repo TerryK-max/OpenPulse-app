@@ -34,7 +34,18 @@ unique et le streame à la box sur le protocole v1 (USB vendor bulk).
 - Unités/axes AC **calibrés** sur une vraie capture mémoire partagée ; la même
   passe côté UDP reste à faire — voir [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
-À venir (Phase C) : moteur d'effets, mixeur, profils.
+**Phase C — moteur d'effets** :
+
+- `Effect` ABC + `engine/dsp.py` + **12 effets** (`road`, `engine`, `grip_scrub`,
+  `lockup`, `wheelspin`, `abs_pulse`, `tc_cut`, `kerb`, `gearshift`,
+  `rev_limiter`, `impact`, `offtrack`) — voir [docs/EFFECTS.md](docs/EFFECTS.md).
+- `mixer` (ducking, soft-limiter, noise gate, garde thermique) + `pipeline` →
+  un flux 0..1 ; `PipelineStreamer` vers la box.
+- `openpulse-preview` : rejoue une capture dans le moteur → WAV + rapport.
+- GUI : fenêtres **Effects** (params live) + **Mixer** (VU + scope).
+- Calibré sur le tour réel ; tuning au ressenti sur la box à venir.
+
+À venir (Phase D) : profils par voiture, `SET_CONFIG` GUI, packaging.
 Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
 ## Installation
@@ -68,9 +79,13 @@ openpulse-cli --list
 openpulse                       # GUI : Connect, puis Start telemetry, puis Bridge to box
 openpulse-bridge --map grip_scrub --telemetry auto      # sentir la saturation d'adhérence
 
-# capturer / analyser / trimer une session AC
+# conduire la box depuis le moteur d'effets (avec la box + AC)
+openpulse                       # GUI : Connect -> Start telemetry -> "Effect engine"
+
+# capturer / analyser / prévisualiser / trimer une session AC
 openpulse-capture --source ac-shm --seconds 40 --out recordings/lap.jsonl
 openpulse-analyze recordings/lap.jsonl --on-track-only     # percentiles -> calibration
+openpulse-preview recordings/lap.jsonl                     # -> WAV du rendu moteur + rapport
 openpulse-trim recordings/lap.jsonl tests/fixtures/ac_shm_<voiture>.jsonl --every 40
 ```
 

@@ -46,10 +46,14 @@ class BoxController:
         self.settings = settings or AppSettings()
         self._session: BoxSession | None = None
         self._streamer = None
+        self._pipeline = None
         self._lock = threading.Lock()
         self._snap = ControllerSnapshot()
         self._ping_nonce = 0
         self._stream_kind = ""
+
+    def pipeline(self):  # noqa: ANN201 - openpulse.engine.Pipeline | None
+        return self._pipeline
 
     # -- snapshot ---------------------------------------------------------- #
     def snapshot(self) -> ControllerSnapshot:
@@ -66,6 +70,13 @@ class BoxController:
             return
         st = s.snapshot()
         streaming = self._streamer is not None and self._streamer.running
+
+        if self._pipeline is not None and st.last_stats is not None:
+            drv_ot = st.last_stats.over_temp or any(
+                f.name == "DRV_OT" for f in st.faults
+            )
+            self._pipeline.set_external_limit(0.0 if drv_ot else 1.0)
+
         self._set(
             status="streaming" if streaming else ("connected" if st.connected else "disconnected"),
             fw=st.handshake.fw if st.handshake else "",
@@ -158,10 +169,31 @@ class BoxController:
         if self._streamer is not None and hasattr(self._streamer, "set_amp_fn"):
             self._streamer.set_amp_fn(amp_fn)  # type: ignore[attr-defined]
 
+    def start_engine(self, frame_getter: Callable[[], object]) -> None:
+        """Phase C: stream the effect engine's output to the box."""
+        from openpulse.engine.pipeline import Pipeline
+        from openpulse.streamer import PipelineStreamer
+
+        if self._session is None or self._streamer is not None:
+            return
+        self._pipeline = Pipeline(self.settings.engine)
+        self._streamer = PipelineStreamer(
+            self._session, self._pipeline, frame_getter,  # type: ignore[arg-type]
+            self.settings.device.sample_rate_hz, self.settings.stream,
+            dither=self.settings.stream.dither,
+        )
+        self._stream_kind = "engine"
+        self._streamer.start()
+
+    def trigger_effect_test(self, effect_id: str) -> None:
+        if self._pipeline is not None:
+            self._pipeline.trigger_test(effect_id)
+
     def stop_stream(self) -> None:
         if self._streamer is not None:
             self._streamer.stop()
             self._streamer = None
+        self._pipeline = None
         self._stream_kind = ""
         if self._session is not None:
             self._session.set_mode(P.MODE_IDLE)

@@ -33,17 +33,23 @@ def test_gui_builds_and_streams():
         dpg.set_value("tl_bridge_map", "grip_scrub")
         gui.controller.connect_async()
         gui._on_telem_start()
-        for i in range(240):
+        for i in range(300):
             gui.update()
             dpg.render_dearpygui_frame()
             if i == 120:
-                gui._on_bridge()
+                gui._on_engine()          # full effect engine -> mock box
+            if i == 200:
+                gui.settings.engine.effects.grip_scrub.gain = 2.0
         box = gui.controller.snapshot()
         tel = gui.telem.snapshot()
+        pipe = gui.controller.pipeline()
         assert box.status in ("connected", "streaming")
         assert box.fw == "0.2"
         assert tel.status == "live" and tel.frame is not None
         assert tel.frame.grip_scrub == tel.frame.grip_scrub  # not NaN
+        assert pipe is not None
+        m = pipe.meters()
+        assert 0.0 <= m.output_peak <= 1.0 and m.blocks > 10
     finally:
         gui.controller.disconnect()
         gui.telem.stop()

@@ -49,8 +49,8 @@ class DeriveConfig(BaseModel):
     abs_est_brake_min: float = 0.35
     abs_est_lock_lo: float = 0.55
     abs_est_lock_hi: float = 0.97
-    tc_est_throttle_min: float = 0.5
-    tc_est_spin_ratio: float = 1.06
+    tc_est_throttle_min: float = 0.55
+    tc_est_spin_ratio: float = 1.14   # real lap: rear lock_ratio p90≈1.09, p95≈1.13
 
     model_config = ConfigDict(extra="forbid")
 

@@ -1,8 +1,9 @@
 # OpenPulse — application PC (le « mixeur »)
 
-> **Statut : Phases A + B implémentées** (transport + télémétrie AC — voir §13).
-> Phase A confirmée sur la box réelle. Phase C (moteur d'effets) à venir. Ce
-> document est le plan cible ; il s'appuie
+> **Statut : Phases A + B + C implémentées** (transport + télémétrie AC + moteur
+> d'effets — voir §13). Phase A confirmée sur la box réelle ; B calibrée sur une
+> vraie capture ; C v1 en place, tuning au ressenti à venir. Ce document est le
+> plan cible ; il s'appuie
 > entièrement sur les docs du firmware (dépôt séparé, fourni en référence) :
 > `OpenPulse-firmware/docs/` — `PROTOCOL.md`, `ARCHITECTURE.md`, `HARDWARE.md`,
 > `ROADMAP.md`.
@@ -643,13 +644,33 @@ Style ROADMAP firmware : chaque phase compile, tourne, et a un critère « fait 
   `scrub_wheelslip_*` réglés sur les percentiles observés. **Reste ouvert** :
   la même passe côté UDP (offset `gear`), l'index yaw de `localAngularVelocity`.
 
-### Phase C — Moteur d'effets v1
-- `Effect` ABC, `dsp.py`, `pipeline.py`, `mixer.py`, les ~11 effets du catalogue,
-  `record.py` rejeu, `SyntheticSource`, `tools/waveform_preview.py`.
-- GUI : panneaux **Effets** + **Mixeur** + scope de sortie.
-- Tests golden par effet sur enregistrements.
-- **Fait** : rouler dans AC → rumble cohérent, effets distinguables au ressenti,
-  aucun écrêtage dur, gate propre à l'arrêt.
+### Phase C — Moteur d'effets v1  —  ✅ FAIT (v1, tuning au ressenti à venir)
+- `engine/effect.py` (`Effect` ABC + `EffectContext`/`EffectBlock`),
+  `engine/dsp.py` (osc phase-continu, bruit de bande, enveloppe one-shot, gate
+  hystérétique, soft-limiter, intégrateur d'énergie), `engine/params.py`
+  (modèles pydantic par effet + mixeur, édités à chaud par la GUI).
+- **12 effets** dans `engine/effects/` : `road`, `engine`, `grip_scrub`,
+  `lockup`, `wheelspin`, `abs_pulse`, `tc_cut`, `kerb`, `gearshift`,
+  `rev_limiter`, `impact`, `offtrack` (voir [EFFECTS.md](EFFECTS.md)).
+- `engine/mixer.py` : lit ambiant (duckable) + lit avant-plan (`grip_scrub`) +
+  événements → ducking → master → soft-limiter → noise gate → garde thermique
+  (leaky energy + `external_limit` depuis `OVER_TEMP`/`FAULT_DRV_OT` de la box)
+  → gamma de sortie.
+- `engine/pipeline.py` : dernière frame (ZOH) → effets (par échantillon) →
+  mixeur → un bloc 0..1 ; rampe `enable` à 0 si télémétrie périmée / hors piste.
+- `streamer.PipelineStreamer` : bloc → quantize int8 → box, même pacing que Phase A.
+- `tools/preview.py` (`openpulse-preview`) : rejoue une capture dans le moteur
+  hors-ligne → WAV (enveloppe × porteuse 158,7 Hz) + rapport par effet.
+- GUI : fenêtres **Effects** (par effet : on/off, gain, params auto-générés,
+  meter, bouton Test) et **Mixer / output** (params mixeur + VU + scope) ;
+  bouton « Effect engine » dans la fenêtre Telemetry.
+- Tests : `test_dsp`, `test_effects` (par effet : borné, muet si off / trigger
+  absent, présent au bon scénario), `test_mixer`, `test_pipeline` (scénarios +
+  le vrai tour `ac_shm_lap.jsonl`). 120 tests.
+- **Calibré** sur `ac_shm_lap.jsonl` : `openpulse-preview` → RMS ≈ 0,37 (sous
+  `thermal_soft`), transitoires ~1,0, `tc_cut`/`kerb`/`wheelspin` ramenés à des
+  taux d'activation réalistes. Reste : la passe de tuning au ressenti sur la box
+  (dont la pente du `grip_scrub`).
 
 ### Phase D — Profils + garde thermique + finition
 - `thermal.py`, limiteur/gate finaux, profils par voiture (auto-switch sur
