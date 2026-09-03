@@ -22,6 +22,26 @@ def test_frame_json_roundtrip():
             or (math.isnan(g.grip_scrub) and math.isnan(f.grip_scrub)))
 
 
+def test_compact_json_roundtrip():
+    src = SyntheticSource("hotlap")
+    src.open()
+    f = Deriver().process(src.build_at(2.0))
+    src.close()
+    compact = frame_to_json(f, compact=True)
+    full = frame_to_json(f, compact=False)
+    assert len(json_len(compact)) < len(json_len(full))
+    g = frame_from_json(compact)
+    # non-derived, non-nan fields survive (rounded)
+    assert g.source == f.source and g.caps == f.caps and g.gear == f.gear
+    assert abs(g.speed_ms - f.speed_ms) < 1e-3
+    assert g.nd_slip == f.nd_slip
+
+
+def json_len(d):
+    import json
+    return json.dumps(d)
+
+
 def test_recorder_and_replay(tmp_path):
     path = tmp_path / "cap.jsonl"
     src = SyntheticSource("hotlap", rate_hz=200)

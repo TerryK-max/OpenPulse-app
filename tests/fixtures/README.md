@@ -30,5 +30,14 @@ If a unit or axis is off, fix it in `openpulse/telemetry/ac/normalize.py` (searc
 for `# VERIFY`) and re-capture. The `--raw` dump (`*.raw.bin`) is the raw struct
 bytes, for checking a byte offset by hand.
 
-Commit both the `.jsonl` and its `.meta.json`. The `*.raw.bin` is gitignored
-(large, machine-specific).
+A full capture is ~1 MB/s of JSONL — **do not commit it**. Keep it under
+`recordings/` (gitignored), run `openpulse-analyze recordings/<file>` to see the
+signal distributions (for tuning `DeriveConfig` / effect thresholds), then trim
+a small committable fixture:
+
+```bash
+openpulse-trim recordings/ac_shm_full.jsonl tests/fixtures/ac_shm_<car>_<track>.jsonl --every 40
+```
+
+Commit the trimmed `.jsonl` + its `.meta.json`. `ac_shm_lap.jsonl` here is one
+such capture (a GT lap on a real install).

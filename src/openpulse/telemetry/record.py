@@ -9,6 +9,7 @@ by the test fixtures.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -27,12 +28,40 @@ _TUPLE_FIELDS = {
 }
 
 
-def frame_to_json(f: TelemetryFrame) -> dict:
+_DERIVED_FIELDS = {
+    "susp_vel_ms", "lock_ratio", "grip_scrub", "grip_scrub_front", "grip_scrub_rear",
+    "jerk_g_s", "impact_g", "gear_change", "rev_limiter", "wheel_speed_ms",
+}
+
+
+def _is_nan(x: object) -> bool:
+    return isinstance(x, float) and math.isnan(x)
+
+
+def frame_to_json(f: TelemetryFrame, *, compact: bool = False) -> dict:
     d = asdict(f)
     d["caps"] = int(f.caps)
     for k in _TUPLE_FIELDS:
         d[k] = list(d[k])
-    return d
+    if not compact:
+        return d
+    # compact: drop NaN scalars, all-NaN tuples, and derived fields (recomputed
+    # on load by the Deriver); round floats. Shrinks fixtures ~5x.
+    def r(x):
+        if isinstance(x, float):
+            return x if (math.isnan(x) or math.isinf(x)) else round(x, 5)
+        if isinstance(x, list):
+            return [r(y) for y in x]
+        return x
+
+    out = {}
+    for k, v in d.items():
+        if k in _DERIVED_FIELDS or _is_nan(v):
+            continue
+        if isinstance(v, list) and v and all(_is_nan(x) for x in v):
+            continue
+        out[k] = r(v)
+    return out
 
 
 def frame_from_json(d: dict) -> TelemetryFrame:

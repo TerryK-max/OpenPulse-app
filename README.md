@@ -27,11 +27,12 @@ unique et le streame à la box sur le protocole v1 (USB vendor bulk).
   multi-OS) ; `ac/normalize.py` (unités AC) ; `Deriver` (`lock_ratio`,
   `susp_vel`, jerk/impact, `grip_scrub`, …).
 - `SyntheticSource` (scénarios), `ReplaySource` + `TelemetryRecorder`.
-- `openpulse-capture` (dump + rapport sanity), `openpulse-bridge` (pont debug :
-  streame `grip_scrub` / `lockup` / `rpm`… droit vers la box).
+- `openpulse-capture` / `openpulse-analyze` / `openpulse-trim` (capture, stats,
+  fixture) ; `openpulse-bridge` (pont debug : `grip_scrub` / `lockup` / `rpm`…
+  droit vers la box).
 - GUI : fenêtre **Telemetry** (moniteur temps réel + enregistrement + pont).
-- Calibration des tags `# VERIFY` à faire contre une vraie capture AC —
-  voir [docs/TELEMETRY.md](docs/TELEMETRY.md) et `tests/fixtures/README.md`.
+- Unités/axes AC **calibrés** sur une vraie capture mémoire partagée ; la même
+  passe côté UDP reste à faire — voir [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
 À venir (Phase C) : moteur d'effets, mixeur, profils.
 Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
@@ -67,8 +68,10 @@ openpulse-cli --list
 openpulse                       # GUI : Connect, puis Start telemetry, puis Bridge to box
 openpulse-bridge --map grip_scrub --telemetry auto      # sentir la saturation d'adhérence
 
-# capturer une session AC pour calibrer / tester
-openpulse-capture --source ac-shm --seconds 40 --raw --out tests/fixtures/ac_shm_lap.jsonl
+# capturer / analyser / trimer une session AC
+openpulse-capture --source ac-shm --seconds 40 --out recordings/lap.jsonl
+openpulse-analyze recordings/lap.jsonl --on-track-only     # percentiles -> calibration
+openpulse-trim recordings/lap.jsonl tests/fixtures/ac_shm_<voiture>.jsonl --every 40
 ```
 
 ## Tests

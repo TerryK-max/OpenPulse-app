@@ -613,7 +613,7 @@ Style ROADMAP firmware : chaque phase compile, tourne, et a un critère « fait 
 - **Fait** : box (réelle ou mock) pilotée depuis l'app, dashboard live, contrôle
   de version au `PONG` (`ProtocolMismatch`), arrêt propre (`SET_MODE IDLE`).
 
-### Phase B — Télémétrie Assetto Corsa  —  ✅ FAIT (calibration fixtures en attente)
+### Phase B — Télémétrie Assetto Corsa  —  ✅ FAIT (calibré sur une capture réelle)
 - `telemetry/frame.py` (`TelemetryFrame` gelée, ~50 champs SI + `Cap` IntFlag),
   `telemetry/base.py` (`TelemetrySource` ABC, `SessionInfo`, `SourceStatus`).
 - `telemetry/ac/structs.py` (ctypes, portés de mdjarv (SHM `Pack=4`) + rickwest
@@ -627,19 +627,21 @@ Style ROADMAP firmware : chaque phase compile, tourne, et a un critère « fait 
   `telemetry/record.py` (`TelemetryRecorder` JSONL + `ReplaySource`),
   `telemetry/registry.py` (`build_source` + auto-détection SHM→UDP),
   `telemetry/controller.py` (`TelemetryController` : thread, snapshot, record).
-- `tools/telemetry_capture.py` (`openpulse-capture`) — dump + rapport de sanity
-  + dump brut `--raw`. `tools/bridge.py` (`openpulse-bridge`) +
-  `debugmap.py` — **pont debug** : streame un scalaire de télémétrie
-  (`grip_scrub`, `lockup`, `rpm`…) directement vers la box.
+- `tools/` : `openpulse-capture` (dump + rapport sanity + `--raw`),
+  `openpulse-analyze` (percentiles d'une capture → calibration des seuils),
+  `openpulse-trim` (grosse capture → fixture compacte commitable),
+  `openpulse-bridge` + `debugmap.py` (**pont debug** : streame un scalaire de
+  télémétrie — `grip_scrub`, `lockup`, `rpm`… — directement vers la box).
 - GUI : fenêtre **Telemetry** (source, moniteur temps réel : vitesse, régime,
   4 roues × 9 métriques, `grip_scrub` en barre, flags ; enregistrement ; pont
   debug vers la box).
 - Tests : `test_ac_structs`, `test_normalize`, `test_derive`, `test_synthetic`,
-  `test_record`, `test_telemetry_controller`, `test_ac_fixture` (auto-skip).
-- **Reste** : calibration des `# VERIFY` (offset `gear` UDP, axes `accel_g`,
-  unité pression, plage `steerAngle`) et des seuils `grip_scrub` contre une
-  vraie capture AC — voir [TELEMETRY.md](TELEMETRY.md) et
-  `tests/fixtures/README.md`.
+  `test_record`, `test_telemetry_controller`, `test_ac_fixture` (tourne sur
+  `tests/fixtures/ac_shm_lap.jsonl`, une vraie capture GT trimée).
+- **Calibré** sur une capture mémoire-partagée réelle (40 s, GT) : unités et axes
+  AC confirmés (voir [TELEMETRY.md](TELEMETRY.md)), `impact_excess_g` et
+  `scrub_wheelslip_*` réglés sur les percentiles observés. **Reste ouvert** :
+  la même passe côté UDP (offset `gear`), l'index yaw de `localAngularVelocity`.
 
 ### Phase C — Moteur d'effets v1
 - `Effect` ABC, `dsp.py`, `pipeline.py`, `mixer.py`, les ~11 effets du catalogue,

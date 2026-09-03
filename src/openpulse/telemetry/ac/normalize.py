@@ -71,7 +71,9 @@ def normalize_shm(
         caps |= Cap.RPM_MAX
 
     omega = _t4(p.wheelAngularSpeed)
-    accel_g = (float(p.accG[0]), float(p.accG[2]), float(p.accG[1]))  # (lat, lon, vert)  # VERIFY
+    # AC frame X=lateral, Y=vertical, Z=longitudinal (localVelocity[2] == forward
+    # speed on capture confirms Z). Our accel_g is (lateral, longitudinal, vertical).
+    accel_g = (float(p.accG[0]), float(p.accG[2]), float(p.accG[1]))
 
     return TelemetryFrame(
         t_mono=t_mono,
@@ -91,20 +93,22 @@ def normalize_shm(
         throttle=float(p.gas),
         brake=float(p.brake),
         clutch=float(p.clutch),
-        steer=float(p.steerAngle),  # VERIFY range (-1..1 vs radians)
+        steer=float(p.steerAngle),  # normalized -1..1 (confirmed on capture)
         wheel_omega=omega,
         wheel_speed_ms=_radius_speed(omega, radius),
         combined_slip=_t4(p.wheelSlip),
         load_n=load,
         susp_travel_m=_t4(p.suspensionTravel),
-        tyre_press_kpa=tuple(x * _PSI_TO_KPA for x in _t4(p.wheelsPressure)),  # type: ignore[arg-type]  # VERIFY
+        tyre_press_kpa=tuple(x * _PSI_TO_KPA for x in _t4(p.wheelsPressure)),  # type: ignore[arg-type]  # psi->kPa confirmed
         tyre_temp_c=_t4(p.tyreCoreTemperature),
-        tyre_wear=_t4(p.tyreWear),
-        tyre_dirt=_t4(p.tyreDirtyLevel),
+        # AC tyreWear: 100 = new. Ours: 0 = new, 1 = worn.  AC dirt counter runs 0..~5.
+        tyre_wear=tuple((100.0 - w) / 100.0 for w in _t4(p.tyreWear)),  # type: ignore[arg-type]
+        tyre_dirt=tuple(min(1.0, d / 5.0) for d in _t4(p.tyreDirtyLevel)),  # type: ignore[arg-type]
         tyre_radius_m=radius,
         accel_g=accel_g,
+        # localVelocity[2] == forward speed (confirmed on capture) -> Z is longitudinal
         local_vel_ms=(float(p.localVelocity[0]), float(p.localVelocity[1]), float(p.localVelocity[2])),
-        yaw_rate=float(p.localAngularVelocity[1]),  # VERIFY axis
+        yaw_rate=float(p.localAngularVelocity[1]),  # VERIFY axis (reads ~0 going straight, plausible)
         abs_available=bool(p.abs > 0),
         tc_available=bool(p.tc > 0),
         drs_active=bool(p.drs > 0),

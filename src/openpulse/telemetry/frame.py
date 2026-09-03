@@ -89,8 +89,8 @@ class TelemetryFrame:
     susp_travel_m: Wheel4 = _NAN4      # real travel (SHM) or ride-height proxy (UDP)
     tyre_press_kpa: Wheel4 = _NAN4
     tyre_temp_c: Wheel4 = _NAN4
-    tyre_wear: Wheel4 = _NAN4
-    tyre_dirt: Wheel4 = _NAN4          # 0..1
+    tyre_wear: Wheel4 = _NAN4          # 0 = new, 1 = fully worn
+    tyre_dirt: Wheel4 = _NAN4          # 0..1 (normalized from AC's 0..~5 counter)
     tyre_radius_m: Wheel4 = _NAN4
 
     # -- chassis --

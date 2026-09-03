@@ -71,6 +71,27 @@ def test_gear_change_edge():
         assert frames[i + 1].gear_change == 0
 
 
+def test_duplicate_packet_does_not_spike_derivatives():
+    from dataclasses import replace
+
+    src = SyntheticSource("impact", rate_hz=333)
+    src.open()
+    dv = Deriver()
+    prev = None
+    for k in range(600):
+        raw = src.build_at(k / 333)
+        f = dv.process(raw)
+        # feed the SAME packet again immediately (a faster-than-physics poll)
+        dup = replace(raw, t_mono=raw.t_mono + 0.0005, packet_id=raw.packet_id)
+        g = dv.process(dup)
+        # duplicate must not invent a huge jerk from a ~0 dt
+        assert not math.isfinite(g.jerk_g_s) or g.jerk_g_s < 1e4
+        assert g.impact_g == f.impact_g  # re-served, unchanged
+        prev = f
+    src.close()
+    assert prev is not None
+
+
 def test_grip_scrub_from_combined_slip_when_no_nd_slip():
     # simulate an SHM-style frame: COMBINED_SLIP but no ND_SLIP
     from dataclasses import replace
