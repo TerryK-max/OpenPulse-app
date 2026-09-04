@@ -1,98 +1,99 @@
-# OpenPulse — application PC
+# OpenPulse — PC application
 
-Le « mixeur » côté PC pour la box haptique [OpenPulse](../OpenPulse-firmware).
-Lit la télémétrie d'un jeu de sim racing, la transforme en un flux d'amplitude
-unique et le streame à la box sur le protocole v1 (USB vendor bulk).
+The PC-side "mixer" for the [OpenPulse](../OpenPulse-firmware) haptic box.
+Reads telemetry from a sim-racing game, turns it into a single amplitude
+stream, and streams it to the box over protocol v1 (USB vendor bulk).
 
-> **Dépôt séparé du firmware.** Le firmware n'est ici qu'en référence.
-> Plan complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> **Separate repo from the firmware.** The firmware is here only as reference.
+> Full plan: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## État — Phases A + B
+## Status — Phases A + B + C
 
-**Phase A — transport** (confirmée sur la box réelle) :
+**Phase A — transport** (confirmed on the real box):
 
-- `openpulse.transport.protocol` — miroir bit-identique de
-  `OpenPulse-firmware/src/link/proto.h` + auto-tests.
-- `Transport` abstrait ; `UsbVendorTransport` (pyusb + backend `libusb-package`,
-  port de `open_box()`) ; `MockTransport` (fausse box en process).
-- `BoxSession` — handshake `RESYNC → PING → SET_CONFIG → SET_MODE`, contrôle de
-  version (PROTOCOL §7), thread lecteur, RTT.
-- `SampleStreamer` — boucle de pacing temps-réel (modèle validé au banc).
-- `openpulse-cli` — streamer headless, parité avec `pc_sender/openpulse_send.py`.
+- `openpulse.transport.protocol` — bit-identical mirror of
+  `OpenPulse-firmware/src/link/proto.h` + self-tests.
+- `Transport` abstraction; `UsbVendorTransport` (pyusb + `libusb-package`
+  backend, port of `open_box()`); `MockTransport` (in-process fake box).
+- `BoxSession` — `RESYNC → PING → SET_CONFIG → SET_MODE` handshake, version
+  check (PROTOCOL §7), reader thread, RTT.
+- `SampleStreamer` — real-time pacing loop (bench-validated model).
+- `openpulse-cli` — headless streamer, parity with `pc_sender/openpulse_send.py`.
 
-**Phase B — télémétrie Assetto Corsa** :
+**Phase B — Assetto Corsa telemetry**:
 
-- `TelemetryFrame` normalisée (SI, `Cap` IntFlag) + `TelemetrySource` abstrait.
-- `ac-shm` (mémoire partagée `acpmf_*`, Windows) et `ac-udp` (port 9996,
-  multi-OS) ; `ac/normalize.py` (unités AC) ; `Deriver` (`lock_ratio`,
+- Normalized `TelemetryFrame` (SI units, `Cap` IntFlag) + `TelemetrySource`
+  abstraction.
+- `ac-shm` (shared memory `acpmf_*`, Windows) and `ac-udp` (port 9996,
+  multi-OS); `ac/normalize.py` (AC units); `Deriver` (`lock_ratio`,
   `susp_vel`, jerk/impact, `grip_scrub`, …).
-- `SyntheticSource` (scénarios), `ReplaySource` + `TelemetryRecorder`.
+- `SyntheticSource` (scenarios), `ReplaySource` + `TelemetryRecorder`.
 - `openpulse-capture` / `openpulse-analyze` / `openpulse-trim` (capture, stats,
-  fixture) ; `openpulse-bridge` (pont debug : `grip_scrub` / `lockup` / `rpm`…
-  droit vers la box).
-- GUI : fenêtre **Telemetry** (moniteur temps réel + enregistrement + pont).
-- Unités/axes AC **calibrés** sur une vraie capture mémoire partagée ; la même
-  passe côté UDP reste à faire — voir [docs/TELEMETRY.md](docs/TELEMETRY.md).
+  fixture); `openpulse-bridge` (debug bridge: `grip_scrub` / `lockup` / `rpm`…
+  straight to the box).
+- GUI: **Telemetry** window (live monitor + recording + bridge).
+- AC units/axes **calibrated** against a real shared-memory capture; the same
+  pass on the UDP side is still open — see [docs/TELEMETRY.md](docs/TELEMETRY.md).
 
-**Phase C — moteur d'effets** :
+**Phase C — effect engine**:
 
-- `Effect` ABC + `engine/dsp.py` + **12 effets** (`road`, `engine`, `grip_scrub`,
-  `lockup`, `wheelspin`, `abs_pulse`, `tc_cut`, `kerb`, `gearshift`,
-  `rev_limiter`, `impact`, `offtrack`) — voir [docs/EFFECTS.md](docs/EFFECTS.md).
-- `mixer` (ducking, soft-limiter, noise gate, garde thermique) + `pipeline` →
-  un flux 0..1 ; `PipelineStreamer` vers la box.
-- `openpulse-preview` : rejoue une capture dans le moteur → WAV + rapport.
-- GUI : fenêtres **Effects** (params live) + **Mixer** (VU + scope).
-- Calibré sur le tour réel ; tuning au ressenti sur la box à venir.
+- `Effect` ABC + `engine/dsp.py` + **12 effects** (`road`, `engine`,
+  `grip_scrub`, `lockup`, `wheelspin`, `abs_pulse`, `tc_cut`, `kerb`,
+  `gearshift`, `rev_limiter`, `impact`, `offtrack`) — see
+  [docs/EFFECTS.md](docs/EFFECTS.md).
+- `mixer` (ducking, soft limiter, noise gate, thermal guard) + `pipeline` →
+  a 0..1 stream; `PipelineStreamer` to the box.
+- `openpulse-preview`: replays a capture through the engine → WAV + report.
+- GUI: **Effects** (live params) + **Mixer** (VU + scope) windows.
+- Calibrated against the real lap; feel-tuning on the box still to come.
 
-À venir (Phase D) : profils par voiture, `SET_CONFIG` GUI, packaging.
-Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
+Coming up (Phase D): per-car profiles, `SET_CONFIG` GUI, packaging.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
-## Installation
+## Install
 
 ```bash
 python -m venv .venv
-# Windows : .venv\Scripts\activate      Linux/macOS : source .venv/bin/activate
+# Windows: .venv\Scripts\activate      Linux/macOS: source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-pyusb a besoin d'un backend **libusb** : Windows (DLL fournie par le paquet /
+pyusb needs a **libusb** backend: Windows (DLL bundled with the package /
 Zadig), Debian/Ubuntu `libusb-1.0-0`, macOS `brew install libusb`.
 
-### Windows — bind de l'interface vendor
+### Windows — binding the vendor interface
 
-Le firmware n'a pas encore de descripteurs MS OS 2.0 : lier **une fois**
-l'interface 2 (« OpenPulse vendor ») à **WinUSB** ou **libusbK** via
-[Zadig](https://zadig.akeo.ie/). Sinon l'app affiche l'erreur « could not claim
-the vendor interface ».
+The firmware has no MS OS 2.0 descriptors yet: bind interface 2 ("OpenPulse
+vendor") to **WinUSB** or **libusbK** via [Zadig](https://zadig.akeo.ie/)
+**once**. Otherwise the app shows "could not claim the vendor interface".
 
-## Utilisation
+## Usage
 
 ```bash
-# sans matériel — fausse box + télémétrie synthétique
+# no hardware — fake box + synthetic telemetry
 openpulse-cli --transport mock --wave sim --duration 10
 openpulse-bridge --transport mock --telemetry synthetic --scenario grip_scrub --map grip_scrub
 openpulse --transport mock
 
-# avec la box
+# with the box
 openpulse-cli --list
-openpulse                       # GUI : Connect, puis Start telemetry, puis Bridge to box
-openpulse-bridge --map grip_scrub --telemetry auto      # sentir la saturation d'adhérence
+openpulse                       # GUI: Connect, then Start telemetry, then Bridge to box
+openpulse-bridge --map grip_scrub --telemetry auto      # feel the grip saturation
 
-# conduire la box depuis le moteur d'effets (avec la box + AC)
-openpulse                       # GUI : Connect -> Start telemetry -> "Effect engine"
+# drive the box from the effect engine (with the box + AC)
+openpulse                       # GUI: Connect -> Start telemetry -> "Effect engine"
 
-# capturer / analyser / prévisualiser / trimer une session AC
+# capture / analyze / preview / trim an AC session
 openpulse-capture --source ac-shm --seconds 40 --out recordings/lap.jsonl
 openpulse-analyze recordings/lap.jsonl --on-track-only     # percentiles -> calibration
-openpulse-preview recordings/lap.jsonl                     # -> WAV du rendu moteur + rapport
-openpulse-trim recordings/lap.jsonl tests/fixtures/ac_shm_<voiture>.jsonl --every 40
+openpulse-preview recordings/lap.jsonl                     # -> WAV of the engine render + report
+openpulse-trim recordings/lap.jsonl tests/fixtures/ac_shm_<car>.jsonl --every 40
 ```
 
 ## Tests
 
 ```bash
-pytest          # 100 % logiciel, ni jeu ni box
+pytest          # 100% software, no game or box needed
 ```
 
 ## Licence

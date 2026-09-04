@@ -1,143 +1,141 @@
-# OpenPulse — application PC (le « mixeur »)
+# OpenPulse — PC application (the "mixer")
 
-> **Statut : Phases A + B + C implémentées** (transport + télémétrie AC + moteur
-> d'effets — voir §13). Phase A confirmée sur la box réelle ; B calibrée sur une
-> vraie capture ; C v1 en place, tuning au ressenti à venir. Ce document est le
-> plan cible ; il s'appuie
-> entièrement sur les docs du firmware (dépôt séparé, fourni en référence) :
-> `OpenPulse-firmware/docs/` — `PROTOCOL.md`, `ARCHITECTURE.md`, `HARDWARE.md`,
-> `ROADMAP.md`.
+> **Status: Phases A + B + C implemented** (transport + AC telemetry + effect
+> engine — see §13). Phase A confirmed on the real box; B calibrated against a
+> real capture; C v1 in place, feel-tuning still to come. This document is the
+> target plan; it relies entirely on the firmware docs (separate repo, provided
+> as reference): `OpenPulse-firmware/docs/` — `PROTOCOL.md`, `ARCHITECTURE.md`,
+> `HARDWARE.md`, `ROADMAP.md`.
 >
-> **Décisions actées** : « DMA » = interface **mémoire partagée officielle d'AC**
-> (`acpmf_*`). Dépôt **séparé** du firmware. **Multi-OS** (Windows + Linux +
-> macOS) — cas d'usage explicite : box sur un PC, jeu + télémétrie UDP sur un
-> autre. Dépendances tierces **autorisées** (numpy, pydantic, dearpygui, pyusb,
-> libusb-package…).
+> **Decisions made**: "DMA" = AC's **official shared-memory interface**
+> (`acpmf_*`). **Separate** repo from the firmware. **Multi-OS** (Windows +
+> Linux + macOS) — explicit use case: box on one PC, game + UDP telemetry on
+> another. Third-party dependencies **allowed** (numpy, pydantic, dearpygui,
+> pyusb, libusb-package…).
 
 ---
 
-## 0. En une phrase
+## 0. In one sentence
 
-Une application Python (GUI **dearpygui**) qui lit la **télémétrie d'un jeu**,
-la transforme en un **flux d'amplitude unique** via un moteur d'effets modulaire,
-et le **streame à la box OpenPulse** sur le protocole v1 (USB vendor bulk
-aujourd'hui, 2.4 GHz plus tard). Premier jeu : **Assetto Corsa** (mémoire
-partagée *et* UDP). L'architecture est pensée pour ajouter d'autres jeux sans
-toucher au moteur d'effets ni au transport.
+A Python application (**dearpygui** GUI) that reads **telemetry from a game**,
+turns it into a **single amplitude stream** through a modular effect engine,
+and **streams it to the OpenPulse box** over protocol v1 (USB vendor bulk
+today, 2.4 GHz later). First game: **Assetto Corsa** (shared memory *and*
+UDP). The architecture is designed so other games can be added without
+touching the effect engine or the transport.
 
 ---
 
-## 1. Ce que le firmware impose (contraintes, non négociables)
+## 1. What the firmware imposes (constraints, non-negotiable)
 
-Tiré des docs firmware. L'app doit s'y plier au bit près.
+Pulled from the firmware docs. The app must follow these to the byte.
 
-| Contrainte | Détail | Conséquence pour l'app |
+| Constraint | Detail | Consequence for the app |
 |---|---|---|
-| **La box est un *renderer* bête** | Aucune synthèse d'effet à bord (juste self-test + rampe de sécurité). | **Tout** le calcul d'effet, le mixage, la mise en forme, la protection thermique se font côté PC. |
-| **Entrée = enveloppe d'amplitude** | La box commute la LRA en boucle ouverte à **~158,7 Hz** fixe. L'échantillon `int8` n'est *pas* de l'audio : c'est l'**amplitude** de cette porteuse. | Nos « fréquences » d'effets sont des fréquences de **modulation d'amplitude**, bande utile **~1–80 Hz** (au-delà, l'actionneur ne suit pas : montée mécanique 10–20 ms). |
-| **Échantillon** | `int8` signé, `-127..+127`. `0` = pas d'entraînement. Le PC envoie normalement `0..127` ; le négatif = phase inverse (freinage anti-phase explicite). | v1 : sortie `0..127`. Le bipolaire (edge d'impact net) est une option ultérieure. |
-| **Débit** | `sample_rate_hz` réglable `250..4000`, défaut **1000** (2000 OK). Banc : la box tient **≥ 4 kHz sans perte**. | Moteur DSP cadencé à `sample_rate_hz` du device (défaut 1000). Phase 5 firmware (PWM) inutile. |
-| **Trame** | `[TYPE][SEQ][LEN][PAYLOAD≤56][CRC8]`, total 4..60 o. CRC-8/SMBUS (poly `0x07`). LE. **Une trame = une transaction USB bulk.** | `batch ≤ 56` échantillons/trame. `proto.py` mirroir bit-identique de `src/link/proto.h`. |
-| **Handshake** | `RESYNC` → `PING` → `SET_CONFIG(version=1,…)` → `SET_MODE(SAMPLES)` → amorçage FIFO → stream. `STATUS_REQ` à ~10 Hz. | **`RESYNC` en premier** (fix de banc 2026-09-02 : reseat le SEQ, fait céder le self-test local de la box). |
-| **Version** | `SET_CONFIG.version != 1` → `FAULT_VERSION` + plan data bloqué. `PONG.proto_version` doit valoir 1. | À la connexion : `PING`, vérifier `proto_version` **et** `fw_major.fw_minor` ; mismatch → refus de streamer + message clair (PROTOCOL §7). |
-| **Failsafe** | Pas de trame data valide pendant `failsafe_ms` (défaut 100) → la box rampe à 0. Reset USB / déconnexion → rampe immédiate. | Quand la télémétrie stoppe (pause, menu, jeu fermé) : ramper notre sortie à 0 et envoyer des zéros (évite de spammer `failsafe_trips`). |
-| **Lookahead** | Le PC garde la FIFO box remplie ~40 ms d'avance (réglable). FIFO box = 256 échantillons. | Buffer d'anticipation réglable **8–60 ms**, défaut ~20 ms. Compromis latence/jitter exposé dans la GUI. |
-| **Perte** | Lossy-but-live. `loss_policy` 0 = zero-fill (défaut), 1 = hold-last. Pas d'ARQ. | En USB la perte est quasi nulle ; garder zero-fill. Le choix comptera pour la RF (Phase 4). |
-| **OD_CLAMP / OL_LRA_PERIOD** | Constantes **[MESURÉES]** (`0xC0` ≈ 4,15 V crête ; `64` ≈ 158,7 Hz). Ne pas changer sans banc. | La GUI expose `od_clamp` derrière un volet « Avancé (matériel) » avec l'avertissement HARDWARE.md ; `ol_lra_period` en lecture quasi seule. Le réglage de « volume » se fait en **soft** (mise à l'échelle de l'amplitude), pas via `OD_CLAMP`. |
-| **Thermique** | Actionneur salvagé (Taptic Engine). Démag. NdFeB irréversible dès ~80 °C. Niveau *soutenu* `0x48/127` ≈ 2,35 V jugé « thermiquement tenable » au banc. | **Garde thermique logicielle obligatoire** : intégrateur d'énergie + repli de gain + prise en compte de `drv_status` OVER_TEMP / `FAULT_DRV_OT`. |
-| **Windows** | Pas de descripteurs MS OS 2.0 (firmware Phase 3.6 non faite) → l'interface 2 (vendor) nécessite un bind **WinUSB/libusbK via Zadig**, une fois. | L'app détecte « device vu mais interface 2 non réclamable » → écran d'aide guidé. Disparaît quand 3.6 atterrit. |
+| **The box is a dumb *renderer*** | No effect synthesis on board (just a self-test + a safety ramp). | **All** effect computation, mixing, shaping, and thermal protection happen on the PC. |
+| **Input = amplitude envelope** | The box commutates the LRA open-loop at a fixed **~158.7 Hz**. The `int8` sample is *not* audio: it's the **amplitude** of that carrier. | Our effect "frequencies" are **amplitude-modulation** frequencies, useful band **~1–80 Hz** (beyond that the actuator can't keep up: 10–20 ms mechanical rise). |
+| **Sample** | Signed `int8`, `-127..+127`. `0` = no drive. The PC normally sends `0..127`; negative = anti-phase (explicit braking). | v1: output `0..127`. Bipolar (a crisp impact edge) is a later option. |
+| **Rate** | `sample_rate_hz` tunable `250..4000`, default **1000** (2000 OK). Bench: the box holds **≥ 4 kHz with no loss**. | DSP engine clocked at the device's `sample_rate_hz`. Firmware Phase 5 (PWM) not needed. |
+| **Frame** | `[TYPE][SEQ][LEN][PAYLOAD≤56][CRC8]`, total 4..60 B. CRC-8/SMBUS (poly `0x07`). LE. **One frame = one USB bulk transaction.** | `batch ≤ 56` samples/frame. `proto.py` is a bit-identical mirror of `src/link/proto.h`. |
+| **Handshake** | `RESYNC` → `PING` → `SET_CONFIG(version=1,…)` → `SET_MODE(SAMPLES)` → prime the FIFO → stream. `STATUS_REQ` at ~10 Hz. | **`RESYNC` first** (bench fix 2026-09-02: reseats SEQ, makes the box's local self-test step aside). |
+| **Version** | `SET_CONFIG.version != 1` → `FAULT_VERSION` + data plane blocked. `PONG.proto_version` must be 1. | On connect: `PING`, check `proto_version` **and** `fw_major.fw_minor`; mismatch → refuse to stream + a clear message (PROTOCOL §7). |
+| **Failsafe** | No valid data frame for `failsafe_ms` (default 100) → the box ramps to 0. USB reset / disconnect → immediate ramp. | When telemetry stops (pause, menu, game closed): ramp our output to 0 and keep sending zeros (avoids spamming `failsafe_trips`). |
+| **Lookahead** | The PC keeps the box FIFO filled ~40 ms ahead (tunable). Box FIFO = 256 samples. | Tunable lookahead buffer **8–60 ms**, default ~20 ms. Latency/jitter trade-off exposed in the GUI. |
+| **Loss** | Lossy-but-live. `loss_policy` 0 = zero-fill (default), 1 = hold-last. No ARQ. | Over USB loss is near zero; keep zero-fill. The choice will matter for RF (Phase 4). |
+| **OD_CLAMP / OL_LRA_PERIOD** | **[MEASURED]** constants (`0xC0` ≈ 4.15 V peak; `64` ≈ 158.7 Hz). Do not change without a bench test. | The GUI exposes `od_clamp` behind an "Advanced (hardware)" panel with the HARDWARE.md warning; `ol_lra_period` is near read-only. "Volume" is set in **software** (amplitude scaling), not via `OD_CLAMP`. |
+| **Thermal** | Salvaged actuator (Taptic Engine). Irreversible NdFeB demagnetization from ~80 °C. *Sustained* level `0x48/127` ≈ 2.35 V judged "thermally sustainable" on the bench. | **Software thermal guard mandatory**: energy integrator + gain foldback + reading `drv_status` OVER_TEMP / `FAULT_DRV_OT`. |
+| **Windows** | No MS OS 2.0 descriptors (firmware Phase 3.6 not done) → interface 2 (vendor) needs a **WinUSB/libusbK bind via Zadig**, once. | The app detects "device seen but interface 2 not claimable" → a guided help screen. Goes away once 3.6 lands. |
 
-**Réutilisation directe** : `OpenPulse-firmware/tools/pc_sender/` (`proto.py`,
-`openpulse_send.py`) est un émetteur minimal **déjà validé au banc**. La couche
-transport de l'app en est le portage propre ; la boucle de pacing est reprise
-telle quelle.
-
----
-
-## 2. Principes directeurs
-
-1. **Frontière nette télémétrie ↔ effets ↔ transport.** Chaque couche a une
-   interface abstraite ; on ajoute un jeu = une classe `TelemetrySource` + un
-   normaliseur, rien d'autre ne bouge.
-2. **Schéma de télémétrie normalisé, unités SI, agnostique du jeu.** Les effets
-   ne voient jamais une structure Assetto Corsa.
-3. **Le moteur d'effets est un banc de petites unités DSP indépendantes.** Chacune
-   testable seule, activable/désactivable, réglable à chaud.
-4. **Un seul actionneur → un « langage vibratoire ».** Chaque effet a une
-   signature (bande de modulation + texture) distincte pour rester
-   reconnaissable une fois tout mélangé (§5.1).
-5. **GUI et moteur séparés.** dearpygui tourne dans son thread ; le moteur dans
-   le sien. Échange par snapshots + files de commandes. La GUI ne peut jamais
-   faire caler le pipeline.
-6. **Tout est testable sans matériel.** `MockTransport` + rejeu de télémétrie
-   enregistrée → CI 100 % Python, sans jeu, sans box.
-7. **`proto.py` suit `proto.h` au bit près.** Auto-tests (tailles de structs,
-   vecteur CRC) qui échouent bruyamment en cas de dérive.
-
-**Non-objectifs v1** : multi-actionneur, retour de force volant / audio, jeux
-autres qu'Assetto Corsa, mode `ENVELOPE`, persistance DataFlash, calibration
-thermique NTC, descripteurs MS OS 2.0 (côté firmware).
+**Direct reuse**: `OpenPulse-firmware/tools/pc_sender/` (`proto.py`,
+`openpulse_send.py`) is a minimal sender **already bench-validated**. The
+app's transport layer is a clean port of it; the pacing loop is reused as-is.
 
 ---
 
-## 3. Vue d'ensemble du pipeline
+## 2. Guiding principles
+
+1. **A clean boundary between telemetry ↔ effects ↔ transport.** Each layer
+   has an abstract interface; adding a game = one `TelemetrySource` class +
+   one normalizer, nothing else moves.
+2. **A normalized, SI-unit, game-agnostic telemetry schema.** Effects never
+   see an Assetto Corsa struct.
+3. **The effect engine is a bank of small, independent DSP units.** Each is
+   individually testable, can be enabled/disabled, and is tunable live.
+4. **One actuator → one "vibratory language".** Every effect has a distinct
+   signature (modulation band + texture) so it stays recognizable once
+   everything is mixed together (§5.1).
+5. **GUI and engine are separate.** dearpygui runs on its own thread; the
+   engine on its own. They exchange snapshots + command queues. The GUI can
+   never stall the pipeline.
+6. **Everything is testable with no hardware.** `MockTransport` + replaying
+   recorded telemetry → 100% Python CI, no game, no box.
+7. **`proto.py` tracks `proto.h` to the byte.** Self-tests (struct sizes, CRC
+   vector) fail loudly on drift.
+
+**Non-goals for v1**: multi-actuator, steering-wheel force feedback / audio,
+games other than Assetto Corsa, `ENVELOPE` mode, DataFlash persistence, NTC
+thermal calibration, MS OS 2.0 descriptors (firmware side).
+
+---
+
+## 3. Pipeline overview
 
 ```
-┌─ Thread T1 — Acquisition télémétrie ───────────────────────────────────────┐
+┌─ Thread T1 — Telemetry acquisition ────────────────────────────────────────┐
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                       │
-│  │ AC mém.part. │  │  AC UDP:9996 │  │  (futur jeu) │   sources concrètes   │
+│  │ AC shared mem│  │  AC UDP:9996 │  │ (future game)│   concrete sources    │
 │  │  acpmf_*     │  │  RTCarInfo   │  │              │                       │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                       │
 │         └───────────┬─────┴─────────────────┘                               │
-│                     ▼ structs brutes                                       │
+│                     ▼ raw structs                                          │
 │            ┌──────────────────┐                                            │
-│            │ normalize (AC)   │──► TelemetryFrame  (SI, générique,         │
+│            │ normalize (AC)   │──► TelemetryFrame  (SI, generic,           │
 │            │ + derive (Δ, jerk)│      + CapabilitySet)                      │
 │            └────────┬─────────┘                                            │
 └─────────────────────┼──────────────────────────────────────────────────────┘
-                      ▼  swap atomique « dernière frame »          + Recorder
-┌─ Thread T2 — DSP + sortie  (cadence perf_counter) ─────────────────────────┐
+                      ▼  atomic swap of "latest frame"          + Recorder
+┌─ Thread T2 — DSP + output  (perf_counter cadence) ─────────────────────────┐
 │   ┌──────────────────────────────────────────────────────┐                 │
 │   │ Pipeline.generate(n, fs)                              │                 │
-│   │  road  engine  kerb  lockup  wheelspin  abs  shift …  │  chaque effet → │
-│   │   └──────┴──────┴──┬───┴──────────┴──────┴─────┘       │  vecteur 0..1   │
-│   │                    ▼                                   │  @ fs, n éch.   │
-│   │        ┌────────────────────────┐                      │                 │
-│   │        │ Mixer + Master         │  lit vs événements,  │                 │
-│   │        │  ducking / priorité    │  limiteur soft,      │                 │
-│   │        │  noise gate            │  garde thermique     │                 │
-│   │        └───────────┬────────────┘                      │                 │
+│   │  road  engine  kerb  lockup  wheelspin  abs  shift …  │  each effect →  │
+│   │   └──────┴──────┴──┬───┴──────────┴──────┴─────┘       │  0..1 vector   │
+│   │                    ▼                                   │  @ fs, n samp. │
+│   │        ┌────────────────────────┐                      │                │
+│   │        │ Mixer + Master         │  beds vs events,     │                │
+│   │        │  ducking / priority    │  soft limiter,       │                │
+│   │        │  noise gate            │  thermal guard       │                │
+│   │        └───────────┬────────────┘                      │                │
 │   └────────────────────┼───────────────────────────────────┘                │
 │                        ▼  float32 0..1 @ fs                                 │
 │              ┌───────────────────┐                                         │
-│              │ Renderer          │  quantize int8 · batch · buffer         │
-│              │                   │  lookahead · pacing temps-réel          │
+│              │ Renderer          │  int8 quantize · batch · lookahead      │
+│              │                   │  buffer · real-time pacing              │
 │              └────────┬──────────┘                                         │
-│                       ▼  trames DATA_SAMPLES                                │
+│                       ▼  DATA_SAMPLES frames                                │
 │              ┌───────────────────┐                                         │
 │              │ Transport (USB)   │  proto v1 · EP2 OUT · handshake         │
 │              └────────┬──────────┘                                         │
 └───────────────────────┼────────────────────────────────────────────────────┘
                         ▼
                  ╔═════════════╗
-                 ║  OpenPulse  ║   firmware renderer (bête)
+                 ║  OpenPulse  ║   dumb firmware renderer
                  ║     box     ║
                  ╚═════════════╝
                         ▲  PONG / STATUS_REP / LOG / FAULT
-┌─ Thread T3 — retour box ───────────────────────────────────────────────────┐
+┌─ Thread T3 — box feedback ─────────────────────────────────────────────────┐
 │   parse → AppState.device (stats, version, faults, RTT)                     │
 └────────────────────────────────────────────────────────────────────────────┘
 
-   AppState  (snapshots 60 Hz + files de commandes)  ◄──►  Thread GUI (dearpygui)
+   AppState  (60 Hz snapshots + command queues)  ◄──►  GUI thread (dearpygui)
 ```
 
 ---
 
-## 4. Les couches, une par une
+## 4. The layers, one by one
 
-### 4.1 Acquisition télémétrie — `openpulse/telemetry/`
+### 4.1 Telemetry acquisition — `openpulse/telemetry/`
 
-**Interface abstraite** (`telemetry/base.py`) :
+**Abstract interface** (`telemetry/base.py`):
 
 ```python
 class TelemetrySource(Protocol):
@@ -145,201 +143,205 @@ class TelemetrySource(Protocol):
     def open(self) -> None: ...
     def close(self) -> None: ...
     def state(self) -> SourceState           # DISCONNECTED / WAITING_GAME / MENU / ON_TRACK
-    def capabilities(self) -> CapabilitySet  # quels champs la source sait remplir
+    def capabilities(self) -> CapabilitySet  # which fields this source can fill
     def poll(self, timeout_s: float) -> TelemetryFrame | None
-    def session_info(self) -> SessionInfo | None   # jeu, voiture, circuit, max_rpm…
+    def session_info(self) -> SessionInfo | None   # game, car, track, max_rpm…
 ```
 
-`registry.py` : découverte + auto-sélection (essaie mém. partagée, retombe sur
-UDP), ou choix manuel dans la GUI.
+`registry.py`: discovery + auto-selection (tries shared memory, falls back to
+UDP), or a manual choice in the GUI.
 
-#### Assetto Corsa — mémoire partagée (ce que tu appelles « DMA »)
+#### Assetto Corsa — shared memory (what you were calling "DMA")
 
-> ⚠️ **Hypothèse à confirmer** : « DMA » = l'interface **mémoire partagée
-> officielle d'AC** (fichiers *memory-mapped* nommés). Si tu voulais dire lecture
-> de process par pointeur / carte DMA matérielle, la couche d'acquisition change
-> — voir §14 Q1.
+> ⚠️ **Assumption to confirm**: "DMA" = AC's **official shared-memory
+> interface** (named memory-mapped files). If you meant reading the process by
+> pointer / a hardware DMA card instead, the acquisition layer changes — see
+> §14 Q1.
 
-- 3 objets Windows : `Local\acpmf_physics`, `Local\acpmf_graphics`,
-  `Local\acpmf_static`, ouverts en `mmap.mmap(-1, size, tagname)`.
-- Layout décrit par `ctypes.Structure` dans `telemetry/ac/structs.py`, transcrit
-  **avec citation de la source** (SDK Python officiel d'AC / `sdk/dev/`), comme
-  le firmware transcrit les datasheets. Tolérance : champs ajoutés en *queue* de
-  page selon la version du jeu → on lit `min(len(buf), sizeof(struct))`.
-- Cadence : poll ~**333–500 Hz**, on ne consomme que si `physics.packetId` a
-  changé (détecte aussi les frames sautées).
-- Champs clés utilisés : `speedKmh`, `rpms`, `gear`, `gas`, `brake`, `clutch`,
-  `steerAngle`, `accG[3]`, `wheelSlip[4]`, `wheelLoad[4]`, `wheelAngularSpeed[4]`,
-  `suspensionTravel[4]`, `wheelsPressure[4]`, `tyreCoreTemperature[4]`,
-  `slipRatio[4]`/`slipAngle[4]` (builds récents), `numberOfTyresOut`,
-  `pitLimiterOn`, `carDamage[5]`, `drs`, `tc`, `abs`, `localAngularVel[3]`.
+- 3 Windows objects: `Local\acpmf_physics`, `Local\acpmf_graphics`,
+  `Local\acpmf_static`, opened with `mmap.mmap(-1, size, tagname)`.
+- Layout described as a `ctypes.Structure` in `telemetry/ac/structs.py`,
+  transcribed **with the source cited** (AC's official Python SDK /
+  `sdk/dev/`), the same way the firmware transcribes datasheets. Tolerance:
+  fields appended at the *end* of the page depending on the game version → we
+  read `min(len(buf), sizeof(struct))`.
+- Rate: poll ~**333–500 Hz**, only consume when `physics.packetId` has
+  changed (also detects dropped frames).
+- Key fields used: `speedKmh`, `rpms`, `gear`, `gas`, `brake`, `clutch`,
+  `steerAngle`, `accG[3]`, `wheelSlip[4]`, `wheelLoad[4]`,
+  `wheelAngularSpeed[4]`, `suspensionTravel[4]`, `wheelsPressure[4]`,
+  `tyreCoreTemperature[4]`, `slipRatio[4]`/`slipAngle[4]` (recent builds),
+  `numberOfTyresOut`, `pitLimiterOn`, `carDamage[5]`, `drs`, `tc`, `abs`,
+  `localAngularVel[3]`.
 - `graphics.status` (OFF/REPLAY/LIVE/PAUSE), `isInPit`, `surfaceGrip`,
   `completedLaps`.
-- `static.maxRpm`, `static.carModel`, `static.track` → `SessionInfo` + choix de
-  profil automatique.
-- **Source préférée** : plus riche (course de suspension, temp. pneus, dégâts,
-  roues hors-piste, `packetId`).
+- `static.maxRpm`, `static.carModel`, `static.track` → `SessionInfo` +
+  automatic profile selection.
+- **Preferred source**: richer (suspension travel, tyre temps, damage,
+  off-track wheels, `packetId`).
 
 #### Assetto Corsa — UDP
 
-- La box de télémétrie UDP d'AC écoute sur **port 9996** (localhost ou PC
-  distant).
-- Poignée de main : envoyer `handshake{identifier, version, operationId}` :
-  `0` = HANDSHAKE → réponse `HandshakerResponse` (nom voiture/pilote, circuit) ;
-  `1` = SUBSCRIBE_UPDATE → flux `RTCarInfo` ; `3` = DISMISS à la fermeture.
-- `RTCarInfo` (~328 o) : `speed_Kmh`, `engineRPM`, `gear`, `gas`/`brake`/`clutch`,
-  `steer`, `accG[3]`, `isAbsEnabled`, **`isAbsInAction`**, **`isTcInAction`**,
-  `isInPit`, `isEngineLimiterOn`, `wheelAngularSpeed[4]`, `slipAngle[4]`,
-  `slipRatio[4]`, `tyreSlip[4]`, `load[4]`, `tyreDirtyLevel[4]`,
-  `suspensionHeight[4]`, `carCoordinates[3]`, `carPositionNormalized`, `carSlope`.
-- **Manque vs mém. partagée** : `maxRpm` (→ défaut par voiture ou saisi),
-  `suspensionTravel` (on a `suspensionHeight` → dérivée), `tyreCoreTemperature`,
-  `carDamage`, `numberOfTyresOut` (approché par `tyreDirtyLevel`).
-- **Gagne** : `isAbsInAction` / `isTcInAction` en direct (en mém. partagée on les
-  dérive).
-- Réception : socket non bloquante + boucle recv ; ~90–100 Hz effectifs.
-- Cas d'usage : PC de jeu ≠ PC de la box, ou mém. partagée indisponible.
+- AC's UDP telemetry server listens on **port 9996** (localhost or a remote
+  PC).
+- Handshake: send `handshake{identifier, version, operationId}`: `0` =
+  HANDSHAKE → `HandshakerResponse` reply (car/driver name, track); `1` =
+  SUBSCRIBE_UPDATE → `RTCarInfo` stream; `3` = DISMISS on close.
+- `RTCarInfo` (~328 B): `speed_Kmh`, `engineRPM`, `gear`, `gas`/`brake`/
+  `clutch`, `steer`, `accG[3]`, `isAbsEnabled`, **`isAbsInAction`**,
+  **`isTcInAction`**, `isInPit`, `isEngineLimiterOn`, `wheelAngularSpeed[4]`,
+  `slipAngle[4]`, `slipRatio[4]`, `tyreSlip[4]`, `load[4]`,
+  `tyreDirtyLevel[4]`, `suspensionHeight[4]`, `carCoordinates[3]`,
+  `carPositionNormalized`, `carSlope`.
+- **Missing vs shared memory**: `maxRpm` (→ a per-car default or a hint),
+  `suspensionTravel` (we get `suspensionHeight` → derived),
+  `tyreCoreTemperature`, `carDamage`, `numberOfTyresOut` (approximated from
+  `tyreDirtyLevel`).
+- **Gains**: `isAbsInAction` / `isTcInAction` natively (on shared memory we
+  derive them).
+- Reception: non-blocking socket + recv loop; ~90–100 Hz effective.
+- Use case: game PC ≠ box PC, or shared memory unavailable.
 
-`CapabilitySet` porte, par source, les champs valides. Un effet dont une entrée
-manque : bascule sur un estimateur de repli, sinon se désactive avec une note
-GUI (« kerb : nécessite la course de suspension → source mém. partagée »).
+`CapabilitySet` carries, per source, which fields are valid. An effect whose
+input is missing: falls back to an estimator, or disables with a GUI note
+("kerb: needs suspension travel → shared-memory source").
 
-### 4.2 Normalisation — `telemetry/frame.py`, `telemetry/derive.py`
+### 4.2 Normalization — `telemetry/frame.py`, `telemetry/derive.py`
 
-`TelemetryFrame` (dataclass gelée, ~immuable) — SI, repère roues `[FL, FR, RL, RR]` :
+`TelemetryFrame` (frozen, ~immutable dataclass) — SI units, wheel order
+`[FL, FR, RL, RR]`:
 
-| Groupe | Champs |
+| Group | Fields |
 |---|---|
-| méta | `t_mono` (s), `packet_id`, `dt` (s), `source`, `caps` |
+| meta | `t_mono` (s), `packet_id`, `dt` (s), `source`, `caps` |
 | session | `on_track: bool`, `paused`, `in_pit`, `surface_grip` |
-| véhicule | `speed_ms`, `rpm`, `rpm_max`, `gear` (int, −1=R 0=N), `throttle` 0..1, `brake` 0..1, `clutch` 0..1, `steer_rad` |
-| roues ×4 | `slip_ratio`, `slip_angle_rad`, `load_n`, `susp_travel_m`, `susp_vel_ms` *(dérivé)*, `wheel_speed_ms`, `tyre_press_kpa`, `tyre_temp_c`, `lock_ratio` *(dérivé)* |
-| châssis | `accel_g` (x, y, z), `yaw_rate`, `jerk_g_s` *(dérivé)*, `ride_height_m` |
+| vehicle | `speed_ms`, `rpm`, `rpm_max`, `gear` (int, −1=R 0=N), `throttle` 0..1, `brake` 0..1, `clutch` 0..1, `steer_rad` |
+| wheels ×4 | `slip_ratio`, `slip_angle_rad`, `load_n`, `susp_travel_m`, `susp_vel_ms` *(derived)*, `wheel_speed_ms`, `tyre_press_kpa`, `tyre_temp_c`, `lock_ratio` *(derived)* |
+| chassis | `accel_g` (x, y, z), `yaw_rate`, `jerk_g_s` *(derived)*, `ride_height_m` |
 | flags | `abs_active`, `tc_active`, `abs_installed`, `tc_installed`, `drs`, `rev_limiter`, `engine_limiter_flag`, `off_track_wheels` (0..4) |
-| événements | `gear_changed` *(edge)*, `impact_g` *(dérivé, pic)*, `damage_delta` *(dérivé)* |
+| events | `gear_changed` *(edge)*, `impact_g` *(derived, peak)*, `damage_delta` *(derived)* |
 
-`derive.py` — état inter-frames (garde une petite fenêtre glissante) :
-- vitesse de suspension = différence finie filtrée de `susp_travel_m` (ou de
-  `susp_height` en UDP).
-- `lock_ratio` = `wheel_speed / max(speed_ms, ε)` par roue → détection blocage
-  (< seuil au freinage) / patinage (> seuil à l'accélération).
-- `jerk_g_s` = dérivée de `‖accel_g‖` → détection d'impact.
-- `rev_limiter` = `rpm ≥ rpm_max − ε` **ou** `engine_limiter_flag`.
-- `gear_changed` = front sur `gear`.
-- lissage / anti-aliasing des grandeurs bruitées (one-pole).
+`derive.py` — cross-frame state (keeps a small sliding window):
+- suspension velocity = filtered finite difference of `susp_travel_m` (or
+  `susp_height` on UDP).
+- `lock_ratio` = `wheel_speed / max(speed_ms, ε)` per wheel → lockup detection
+  (< threshold under braking) / spin detection (> threshold under
+  acceleration).
+- `jerk_g_s` = derivative of `‖accel_g‖` → impact detection.
+- `rev_limiter` = `rpm ≥ rpm_max − ε` **or** `engine_limiter_flag`.
+- `gear_changed` = edge on `gear`.
+- smoothing / anti-aliasing of noisy quantities (one-pole).
 
-Le normaliseur AC (`telemetry/ac/normalize.py`) est **le seul** endroit qui
-connaît les unités et le repère d'AC (km/h→m/s, ordre des roues, signe du
-steer…).
+The AC normalizer (`telemetry/ac/normalize.py`) is **the only** module that
+knows AC's units and frame of reference (km/h→m/s, wheel order, steer
+sign…).
 
-### 4.3 Moteur d'effets — `openpulse/engine/`
+### 4.3 Effect engine — `openpulse/engine/`
 
-**Interface** (`engine/effect.py`) :
+**Interface** (`engine/effect.py`):
 
 ```python
 @dataclass
 class EffectContext:
-    fs: int                     # = sample_rate_hz du device
-    t0: float                   # temps du 1er échantillon du bloc
-    n: int                      # taille du bloc
+    fs: int                     # = the device's sample_rate_hz
+    t0: float                   # time of the block's first sample
+    n: int                      # block size
     caps: CapabilitySet
     rng: np.random.Generator
 
 class Effect(Protocol):
     id: str
-    kind: Literal["bed", "event"]   # lit continu | événementiel
-    priority: int                    # arbitrage / ducking
+    kind: Literal["bed", "event"]   # continuous bed | event-driven
+    priority: int                    # arbitration / ducking
     def configure(self, params: EffectParams) -> None: ...
     def reset(self) -> None: ...
     def process(self, frame: TelemetryFrame, ctx: EffectContext) -> EffectBlock
 ```
 
-`EffectBlock` = `np.ndarray float32 [n]` dans `0..1` (contribution d'amplitude)
-+ un `duck: float` optionnel (dB d'atténuation demandée sur le lit pendant que
-l'effet est actif). Chaque effet **garde sa continuité de phase** entre blocs
-(accumulateur de phase d'oscillateur, machine à états d'enveloppe) et **lisse ses
-paramètres** issus de la télémétrie (slew one-pole) pour éviter le *zipper
-noise*.
+`EffectBlock` = `np.ndarray float32 [n]` in `0..1` (amplitude contribution) +
+an optional `duck: float` (dB of bed attenuation requested while the effect
+is active). Each effect **keeps its phase continuous** across blocks
+(oscillator phase accumulator, envelope state machine) and **smooths its
+telemetry-derived parameters** (one-pole slew) to avoid *zipper noise*.
 
-**Primitives DSP** (`engine/dsp.py`, numpy, sans état global) :
-`band_noise()` (bruit filtré pour textures), `Oscillator` (sin/tri/carré/pulse à
-rapport cyclique, phase-continu), `OneShotEnv(attack, hold, decay)` déclenchable,
-`OnePole` (lissage / slew), `EdgeDetector` / `Schmitt`, `SoftLimiter` (genou
-tanh), `NoiseGate` (hystérésis), `LeakyEnergy` (modèle thermique).
+**DSP primitives** (`engine/dsp.py`, numpy, no global state):
+`band_noise()` (filtered noise for textures), `Oscillator` (sin/tri/square/
+pulse with duty cycle, phase-continuous), `OneShotEnv(attack, hold, decay)`
+(triggerable), `OnePole` (smoothing / slew), `EdgeDetector` / `Schmitt`,
+`SoftLimiter` (tanh knee), `NoiseGate` (hysteresis), `LeakyEnergy` (thermal
+model).
 
-**Catalogue v1 (Assetto Corsa)** — chaque ligne = un module dans `engine/effects/` :
+**v1 catalogue (Assetto Corsa)** — each row = one module in `engine/effects/`:
 
-| Effet | Type | Entrées | Détection / mapping | Signature (bande, texture) | Paramètres GUI |
+| Effect | Kind | Inputs | Detection / mapping | Signature (band, texture) | GUI params |
 |---|---|---|---|---|---|
-| `road` | lit | `speed_ms`, contenu HF de `susp_travel` / variance `load_n` | RMS HF suspension × courbe(vitesse) | bruit large-bande lissé **5–40 Hz**, niveau plancher | gain, courbe vitesse, plancher/plafond |
-| `engine_rpm` | lit | `rpm`, `rpm_max`, `throttle` | sous-harmonique du régime, ramené dans **8–30 Hz**, monte avec la charge | pulsation régulière lente | gain, diviseur, mélange charge |
-| `rev_limiter` | évén. | `rev_limiter` | flag / seuil régime | **stutter dur ~7–10 Hz**, fort | seuil, gain, fréquence |
-| `gearshift` | évén. | `gear_changed`, `clutch` | front sur la rapport | **1 thump 35–60 ms**, attaque raide (montée ≠ descente) | gain, durée, up/down |
-| `kerb` | évén. | oscillation `susp_travel[essieu]`, pics `load_n`, `off_track_wheels` | oscillation corrélée sur un essieu + sortie partielle | **burst ~45–60 Hz** modulé, intensité = amplitude d'oscillation | gain, seuil, fréquence |
-| `lockup` | évén. | `lock_ratio[avant]`, `brake` | `lock_ratio < seuil` **et** `brake > seuil` | **grind lent ~12–18 Hz**, rugueux | seuil slip, gain, fréquence |
-| `wheelspin` | évén. | `lock_ratio[arrière]`, `throttle`, `slip_ratio` | survitesse roue arrière à l'accélération | **buzz rapide ~25–35 Hz** | seuil, gain, fréquence |
-| `grip_scrub` | lit | `grip_scrub` (dérivé de `nd_slip` / `combined_slip`) | pneus proches du seuil d'adhérence, sans blocage ni patinage franc | **sizzle fin ~20–28 Hz**, monte avec la saturation, avant/arrière séparables | gain, knee (`scrub_nd_lo/hi`), mix avant/arrière |
-| `abs_pulse` | évén. | `abs_active` (UDP) / dérivé (mém.part.), `brake` | flag ABS actif | **pulsation régulière ~15 Hz**, medium | gain, fréquence, source |
-| `tc_cut` | évén. | `tc_active` / slip dérivé | flag TC actif | **saccade ~20 Hz**, faible | gain, fréquence |
-| `impact` | évén. | `jerk_g_s`, `impact_g`, `damage_delta` | `jerk` > seuil ou nouveau dégât | **gros transitoire 40–120 ms**, attaque max, intensité = `|jerk|` | seuil, gain, courbe, cooldown |
-| `offtrack` | évén. | `off_track_wheels` / `tyre_dirty`, `speed_ms` | nb roues dehors × vitesse | **rumble grossier bruité ~8–20 Hz** | gain, mix vitesse, par roue |
-| `slip_slide` *(option)* | lit | `slip_angle` arrière, `yaw_rate` | l'arrière décroche progressivement | **tremor montant 10–20 Hz** | gain, seuil, on/off |
+| `road` | bed | `speed_ms`, HF content of `susp_travel` / `load_n` variance | HF suspension RMS × speed curve | smoothed broadband noise **5–40 Hz**, floor level | gain, speed curve, floor/ceiling |
+| `engine_rpm` | bed | `rpm`, `rpm_max`, `throttle` | sub-harmonic of the rev count, mapped into **8–30 Hz**, rises with load | slow regular pulsation | gain, divider, load mix |
+| `rev_limiter` | event | `rev_limiter` | flag / rpm threshold | **hard stutter ~7–10 Hz**, strong | threshold, gain, frequency |
+| `gearshift` | event | `gear_changed`, `clutch` | edge on gear | **one 35–60 ms thump**, sharp attack (up ≠ down) | gain, duration, up/down |
+| `kerb` | event | `susp_travel[axle]` oscillation, `load_n` spikes, `off_track_wheels` | correlated oscillation on one axle + partial off-track | modulated **~45–60 Hz burst**, intensity = oscillation amplitude | gain, threshold, frequency |
+| `lockup` | event | front `lock_ratio`, `brake` | `lock_ratio < threshold` **and** `brake > threshold` | **slow ~12–18 Hz grind**, rough | slip threshold, gain, frequency |
+| `wheelspin` | event | rear `lock_ratio`, `throttle`, `slip_ratio` | rear wheel over-rotation under acceleration | **fast ~25–35 Hz buzz** | threshold, gain, frequency |
+| `grip_scrub` | bed | `grip_scrub` (derived from `nd_slip` / `combined_slip`) | tyres near the grip limit, without a hard lockup or slide | **fine ~20–28 Hz sizzle**, swells with saturation, front/rear separable | gain, knee (`scrub_nd_lo/hi`), front/rear mix |
+| `abs_pulse` | event | `abs_active` (UDP) / derived (shared mem), `brake` | ABS-active flag | **regular ~15 Hz pulsation**, medium | gain, frequency, source |
+| `tc_cut` | event | `tc_active` / derived slip | TC-active flag | **~20 Hz saccade**, light | gain, frequency |
+| `impact` | event | `jerk_g_s`, `impact_g`, `damage_delta` | `jerk` above threshold or new damage | **big 40–120 ms transient**, max attack, intensity = `\|jerk\|` | threshold, gain, curve, cooldown |
+| `offtrack` | event | `off_track_wheels` / `tyre_dirty`, `speed_ms` | number of wheels off × speed | **coarse noisy rumble ~8–20 Hz** | gain, speed mix, per wheel |
+| `slip_slide` *(optional)* | bed | rear `slip_angle`, `yaw_rate` | the rear progressively steps out | **rising 10–20 Hz tremor** | gain, threshold, on/off |
 
-Ajouter un effet = déposer un fichier dans `engine/effects/`, l'enregistrer dans
-le registre, ajouter son bloc de params au schéma de profil. Zéro impact
-ailleurs.
+Adding an effect = drop a file into `engine/effects/`, register it, add its
+param block to the profile schema. Zero impact elsewhere.
 
-### 4.4 Mixeur & master — `engine/mixer.py`
+### 4.4 Mixer & master — `engine/mixer.py`
 
-Ordre de traitement d'un bloc :
+Per-block processing order:
 
-1. **Lit** : somme des `bed`, mise à l'échelle pour que le lit combiné ≤
-   `bed_ceiling` (défaut ~0,5).
-2. **Événements** : somme des `event`. Chacun peut demander un **ducking** du lit
-   (atténuation X dB pendant sa durée, release court).
-3. **Arbitrage par priorité** : si deux événements haute priorité se recouvrent
-   (`impact` + `kerb`), le moins prioritaire est **atténué, pas supprimé** — on
-   sent encore le kerb sous l'impact. Ordre : `impact` > `kerb` >
-   `lockup`/`wheelspin` > `abs`/`tc` > `gearshift` > `rev_limiter` > `engine` >
-   `road`.
+1. **Beds**: sum, scaled so the combined bed ≤ `bed_ceiling` (default ~0.5).
+2. **Events**: sum. Each can request **ducking** of the bed (X dB
+   attenuation for its duration, short release).
+3. **Priority arbitration**: if two high-priority events overlap (`impact` +
+   `kerb`), the lower-priority one is **attenuated, not dropped** — you still
+   feel the kerb under the impact. Order: `impact` > `kerb` >
+   `lockup`/`wheelspin` > `abs`/`tc` > `gearshift` > `rev_limiter` > `engine`
+   > `road`.
 4. **Master gain**.
-5. **Limiteur soft** (genou tanh) à 1,0 — la somme d'effets coïncidents ne clippe
-   jamais durement.
-6. **Noise gate** : sous `gate_floor` (≈ 0,02) pendant `gate_hold` → sortie
-   **0 dur** (protège l'actionneur, évite le bourdonnement d'inactivité).
-   Hystérésis pour ne pas hacher.
-7. **Garde thermique** (`engine/thermal.py`) :
-   - `E ← E·decay + Σ sample²·dt` (intégrateur à fuite, constante de temps
-     ~dizaines de s à quelques min — cf. HARDWARE §4, actionneur boulonné à un
-     support = dissipateur).
-   - `E > soft_threshold` → `master *= foldback(E)` (courbe douce).
-   - `drv_status` bit OVER_TEMP **ou** `FAULT_DRV_OT` reçu → sortie forcée à 0 +
-     alarme GUI jusqu'à acquittement.
-   - Constantes = estimations conservatrices (niveau soutenu cible autour de
-     `0x48/127`), réglables ; calibrables plus tard contre la NTC (firmware
+5. **Soft limiter** (tanh knee) at 1.0 — the sum of coincident effects never
+   clips hard.
+6. **Noise gate**: below `gate_floor` (≈ 0.02) for `gate_hold` → hard **0**
+   output (protects the actuator, avoids idle buzz). Hysteresis so it
+   doesn't chatter.
+7. **Thermal guard** (`engine/thermal.py`):
+   - `E ← E·decay + Σ sample²·dt` (leaky integrator, time constant ~tens of s
+     to a few minutes — cf. HARDWARE §4, the actuator bolted to a bracket =
+     heatsink).
+   - `E > soft_threshold` → `master *= foldback(E)` (soft curve).
+   - `drv_status` OVER_TEMP bit **or** `FAULT_DRV_OT` received → output
+     forced to 0 + a GUI alarm until acknowledged.
+   - Constants = conservative estimates (target sustained level around
+     `0x48/127`), tunable; calibratable later against the NTC (firmware
      Phase 6.3).
 
-Sortie : `float32 [n]` dans `0..1`.
+Output: `float32 [n]` in `0..1`.
 
-### 4.5 Renderer / sortie device — `openpulse/output/renderer.py`
+### 4.5 Renderer / device output — `openpulse/output/renderer.py`
 
-- **fs interne = `sample_rate_hz` du device** (défaut 1000, ≤ 2000). Pas de
-  rééchantillonnage en v1. (Si un jour on veut un fs interne fixe indépendant du
-  device : resampler polyphase, isolé ici.)
-- Le pipeline produit des **blocs** de ~8–16 échantillons (2–16 ms).
-- **Quantification** : `int8(clip(round(x·127), 0, 127))`. Dither TPDF ~0,5 LSB
-  optionnel (lisse les rampes lentes) — toggle GUI.
-- **Batch + trames** : `batch` échantillons par `DATA_SAMPLES` (défaut 8, ≤ 56).
-- **Buffer lookahead** : maintenir `lookahead_ms` d'avance (défaut ~20 ms,
-  8–60). Amorçage avant le stream, exactement comme `openpulse_send.py`.
-- **Pacing** (repris tel quel du sender de référence) :
+- **Internal fs = the device's `sample_rate_hz`** (default 1000, ≤ 2000). No
+  resampling in v1. (If a fixed internal fs independent of the device is ever
+  needed: a polyphase resampler, isolated here.)
+- The pipeline produces **blocks** of ~8–16 samples (2–16 ms).
+- **Quantization**: `int8(clip(round(x·127), 0, 127))`. Optional ~0.5 LSB TPDF
+  dither (smooths slow ramps) — GUI toggle.
+- **Batch + frames**: `batch` samples per `DATA_SAMPLES` (default 8, ≤ 56).
+- **Lookahead buffer**: keep `lookahead_ms` ahead (default ~20 ms, 8–60).
+  Primed before streaming, exactly like `openpulse_send.py`.
+- **Pacing** (reused as-is from the reference sender):
   `target = int((now − t0)·fs) + lookahead ; while i < target: send(batch)`.
-- **`STATUS_REQ`** à 10 Hz (émis ici ou par T3).
-- **Télémétrie périmée** (pas de frame depuis > `stale_ms`, ou `on_track` faux,
-  ou `paused`) → enveloppe cible 0, on continue d'envoyer des zéros (pas de
-  `failsafe_trips` inutiles). Reprise auto à la frame suivante.
-- **`amp_max` box laissé à 127** : toute la mise en forme se fait en soft (plus
-  de résolution, plus doux). `od_clamp` reste le plafond analogique.
+- **`STATUS_REQ`** at 10 Hz (emitted here or by T3).
+- **Stale telemetry** (no frame for > `stale_ms`, or `on_track` false, or
+  `paused`) → target envelope 0, keep sending zeros (avoids needless
+  `failsafe_trips`). Auto-resumes on the next frame.
+- **Box `amp_max` left at 127**: all shaping happens in software (more
+  resolution, smoother). `od_clamp` stays the analog ceiling.
 
 ### 4.6 Transport — `openpulse/transport/`
 
@@ -348,207 +350,207 @@ class Transport(Protocol):
     def open(self) -> None: ...
     def close(self) -> None: ...
     def send(self, frame: bytes) -> None
-    def frames_in(self) -> Iterator[bytes]      # trames reçues, déjà déframées
+    def frames_in(self) -> Iterator[bytes]      # received frames, already deframed
     def stats(self) -> TransportStats
 ```
 
-| Impl. | Rôle |
+| Impl. | Role |
 |---|---|
-| `UsbVendorTransport` | pyusb, réclame **interface 2** (laisse le CDC à l'OS), EP2 OUT/IN. Portage de `open_box()` + thread lecteur `PONG`/`STATUS`/`LOG`/`FAULT`. Helper `handshake()` (RESYNC→PING→SET_CONFIG→SET_MODE) + contrôle de version sur le `PONG`. |
-| `MockTransport` | Fausse box en process : décode `DATA_SAMPLES` → ring buffer que la GUI trace (et/ou `.wav`), synthétise des `STATUS_REP` plausibles. Fait tourner **toute l'app + GUI sans matériel**. |
-| *(futur)* `RfDongleTransport` | Phase 4 firmware, même interface. |
+| `UsbVendorTransport` | pyusb, claims **interface 2** (leaves CDC to the OS), EP2 OUT/IN. Port of `open_box()` + a `PONG`/`STATUS`/`LOG`/`FAULT` reader thread. `handshake()` helper (RESYNC→PING→SET_CONFIG→SET_MODE) + version check on the `PONG`. |
+| `MockTransport` | In-process fake box: decodes `DATA_SAMPLES` → a ring buffer the GUI plots (and/or a `.wav`), synthesizes plausible `STATUS_REP`. Runs **the whole app + GUI with no hardware**. |
+| *(future)* `RfDongleTransport` | Firmware Phase 4, same interface. |
 
-`transport/protocol.py` = portage **bit-identique** de
-`OpenPulse-firmware/tools/pc_sender/proto.py` (framing, CRC-8, pack des structs)
-+ les `assert` d'auto-test (`_CONFIG.size == 12`, `_STATS.size == 40`,
-`crc8("123456789") == 0xF4`). Règle de synchro documentée : *toute modif de
-`src/link/proto.h` se répercute ici dans le même commit* (même règle que les
-`tools/` du firmware).
+`transport/protocol.py` = a **bit-identical** port of
+`OpenPulse-firmware/tools/pc_sender/proto.py` (framing, CRC-8, struct
+packing) + the self-test `assert`s (`_CONFIG.size == 12`, `_STATS.size ==
+40`, `crc8("123456789") == 0xF4`). Documented sync rule: *any change to
+`src/link/proto.h` is mirrored here in the same commit* (same rule as the
+firmware's `tools/`).
 
 ---
 
-## 5. Conception haptique mono-actionneur
+## 5. Single-actuator haptic design
 
-### 5.1 Le « langage vibratoire »
+### 5.1 The "vibratory language"
 
-Un seul LRA → impossible de séparer spatialement « kerb avant-gauche » de
-« blocage arrière ». On distingue les effets par leur **texture** :
+One LRA → no way to spatially separate "front-left kerb" from "rear lockup".
+Effects are told apart by their **texture**:
 
-| Effet | Bande de modulation | Caractère |
+| Effect | Modulation band | Character |
 |---|---|---|
-| road | 5–40 Hz, bruité | fond lisse, « la voiture roule » |
-| engine | 8–30 Hz, périodique | ronronnement lent |
-| abs | ~15 Hz, régulier | battement propre |
-| lockup | 12–18 Hz, rugueux | grondement qui traîne |
-| wheelspin | 25–35 Hz, bourdon | frétillement aigu |
-| grip_scrub | 20–28 Hz, granuleux léger | grésillement qui enfle vers le seuil |
-| tc | ~20 Hz | micro-saccade brève |
-| kerb | 45–60 Hz, dur | crépitement |
-| rev-limiter | 7–10 Hz, dur | butée qui tape |
-| gearshift | transitoire 40 ms | un coup sec |
-| impact | transitoire 40–120 ms | choc |
+| road | 5–40 Hz, noisy | smooth floor, "the car is rolling" |
+| engine | 8–30 Hz, periodic | slow hum |
+| abs | ~15 Hz, regular | clean beat |
+| lockup | 12–18 Hz, rough | a dragging growl |
+| wheelspin | 25–35 Hz, buzzing | a high-pitched flutter |
+| grip_scrub | 20–28 Hz, lightly grainy | a sizzle that swells toward the limit |
+| tc | ~20 Hz | brief micro-saccade |
+| kerb | 45–60 Hz, hard | crackle |
+| rev-limiter | 7–10 Hz, hard | a hard-hitting stop |
+| gearshift | 40 ms transient | one sharp hit |
+| impact | 40–120 ms transient | a hit |
 
-Une **table de mixage par défaut** (niveaux relatifs) et l'ordre de
-priorité/ducking sont livrés dans le profil `ac-default` et documentés dans
-`docs/EFFECTS.md`. L'utilisateur ajuste au goût.
+A **default mix table** (relative levels) and the priority/ducking order ship
+in the `ac-default` profile and are documented in `docs/EFFECTS.md`. The user
+tunes to taste.
 
-### 5.2 Budget de latence (côté PC)
+### 5.2 Latency budget (PC side)
 
-| Étape | Coût typique | Note |
+| Step | Typical cost | Note |
 |---|---|---|
-| Poll mém. partagée | 2–3 ms | borné par l'intervalle de poll (333–500 Hz) |
-| Réception UDP | ~10 ms | jitter réseau/OS, pire que la mém. partagée |
-| ZOH télémétrie → DSP | ≤ 1 bloc (2–16 ms) | |
-| Génération DSP d'un bloc | ≪ 1 ms | numpy |
-| **Buffer lookahead** | **8–60 ms (défaut ~20)** | **knob dominant**, compromis jitter ↔ latence |
-| `dev.write()` USB | ~0,1 ms | mesuré firmware : 88 µs |
-| Pipeline firmware (trame → jouable) | ~1,7 ms | mesuré, BENCH.md |
-| Montée mécanique LRA | 10–20 ms | incompressible |
+| Shared-memory poll | 2–3 ms | bounded by the poll interval (333–500 Hz) |
+| UDP reception | ~10 ms | network/OS jitter, worse than shared memory |
+| Telemetry ZOH → DSP | ≤ 1 block (2–16 ms) | |
+| DSP generation of one block | ≪ 1 ms | numpy |
+| **Lookahead buffer** | **8–60 ms (default ~20)** | **the dominant knob**, jitter ↔ latency trade-off |
+| USB `dev.write()` | ~0.1 ms | measured on the firmware: 88 µs |
+| Firmware pipeline (frame → playable) | ~1.7 ms | measured, BENCH.md |
+| LRA mechanical rise | 10–20 ms | irreducible |
 
-→ Ressenti total ≈ **35–55 ms** en mém. partagée / lookahead 20 ms, dont ~la
-moitié est mécanique + buffer réglable. Windows : `timeBeginPeriod(1)` au
-démarrage pour un `sleep` à 1 ms.
+→ Total felt latency ≈ **35–55 ms** on shared memory / 20 ms lookahead, about
+half of which is mechanical + the tunable buffer. Windows:
+`timeBeginPeriod(1)` at startup for a 1 ms `sleep`.
 
 ---
 
 ## 6. Orchestration & threads — `openpulse/core/`
 
-| Thread | Rôle | Cadence |
+| Thread | Role | Cadence |
 |---|---|---|
-| **T1 acquisition** | `source.poll()` → normalise → `state.telemetry.set(frame)` (swap atomique) ; alimente le `Recorder` | mém.part. ~500 Hz / UDP à l'arrivée |
-| **T2 DSP + sortie** | lit la dernière frame (ZOH), applique les commandes GUI en attente, `pipeline.generate()`, `renderer` → `transport.send()` | boucle serrée `perf_counter`, blocs 2–16 ms |
-| **T3 retour box** | `transport.frames_in()` → parse → `state.device` (stats, PONG, faults), journal | bloquant + timeout |
-| **GUI** (principal) | dearpygui, boucle de rendu manuelle ; lit les snapshots, pousse des commandes | ~60 fps |
+| **T1 acquisition** | `source.poll()` → normalize → `state.telemetry.set(frame)` (atomic swap); feeds the `Recorder` | shared mem ~500 Hz / UDP on arrival |
+| **T2 DSP + output** | reads the latest frame (ZOH), applies pending GUI commands, `pipeline.generate()`, `renderer` → `transport.send()` | tight `perf_counter` loop, 2–16 ms blocks |
+| **T3 box feedback** | `transport.frames_in()` → parse → `state.device` (stats, PONG, faults), log | blocking + timeout |
+| **GUI** (main) | dearpygui, manual render loop; reads snapshots, pushes commands | ~60 fps |
 
-**Échange d'état** (`core/state.py`) :
-- `state.telemetry` : dernière `TelemetryFrame` (référence swappée, lecture sans
-  lock).
-- `state.commands` : `queue.Queue` de commandes GUI → T2 (changement de gain,
-  toggle d'effet, `SET_CONFIG` device, changement de profil…).
-- `state.snapshot` : `Snapshot` (dataclass) publié ~60 Hz par T2/T3, lu par la
-  GUI. Contient : télémétrie affichable, meters par effet, forme d'onde de
-  sortie (ring ~2 s), stats device, RTT, faults.
-- **Toutes** les mutations dearpygui sur le thread GUI. Les workers ne touchent
-  jamais un widget.
+**State exchange** (`core/state.py`):
+- `state.telemetry`: the latest `TelemetryFrame` (swapped reference, lock-free
+  read).
+- `state.commands`: a `queue.Queue` of GUI → T2 commands (gain change, effect
+  toggle, device `SET_CONFIG`, profile change…).
+- `state.snapshot`: a `Snapshot` (dataclass) published at ~60 Hz by T2/T3,
+  read by the GUI. Contains: displayable telemetry, per-effect meters, output
+  waveform (a ~2 s ring), device stats, RTT, faults.
+- **All** dearpygui mutations happen on the GUI thread. Workers never touch a
+  widget.
 
-**Arrêt propre** : signal → T2 envoie `SET_MODE(IDLE)` → `transport.close()`
-(release interface) → join des threads (daemon). `timeEndPeriod(1)`.
+**Clean shutdown**: signal → T2 sends `SET_MODE(IDLE)` → `transport.close()`
+(release the interface) → join the threads (daemon). `timeEndPeriod(1)`.
 
-Pourquoi threads + files et pas asyncio : pyusb est bloquant, dearpygui a sa
-propre boucle, et le motif de pacing du sender de référence (déjà validé au
-banc) est synchrone. Threads + `queue` = plus simple et éprouvé ici.
-
----
-
-## 7. Configuration & profils — `openpulse/config/`
-
-- Modèles **pydantic** : `AppSettings` (VID/PID, type de transport, hôte/port
-  UDP, prefs UI), `DeviceConfig` (`sample_rate_hz`, `od_clamp`, `ol_lra_period`,
-  `failsafe_ms`, `amp_max`, `loss_policy`, `underrun_decay_ms`), `MixerConfig`,
-  `EffectParams` par effet, `Profile` (nom, jeu, motif d'association voiture,
-  `device`, `mixer`, `effects{}`).
-- Stockage : `%APPDATA%/OpenPulse/` (`settings.toml`, `profiles/*.toml`).
-  Profils par défaut embarqués, copiés au premier lancement (`ac-default`,
-  `ac-gt3`, `ac-formula`, …).
-- **Résolution de profil** : à la connexion télémétrie, lire `carModel`
-  (mém. part.) / `carName` (handshake UDP) → profil dont le motif (glob/regex)
-  matche, sinon défaut du jeu. Override manuel dans la GUI. `Enregistrer` /
-  `Enregistrer sous` / `Dupliquer` / `Revenir`.
-- **Garde-fous device** : bornage aux plages proto (`link_control.c`). *Avertir*
-  (sans bloquer) si `od_clamp > 0xC0` (thermique) ou `sample_rate_hz > 2000`
-  (inutile, BENCH.md). Afficher en clair la fréquence pour `ol_lra_period`
-  (`f = 1e6/(olp·98,46)`) et la tension crête pour `od_clamp`
-  (`≈ 21,6 mV·od_clamp`). `ol_lra_period` derrière un volet « Avancé (matériel) »
-  avec l'avertissement HARDWARE.md — c'est une constante mesurée.
+Why threads + queues and not asyncio: pyusb is blocking, dearpygui has its
+own loop, and the reference sender's pacing pattern (already bench-validated)
+is synchronous. Threads + `queue` are simpler and proven here.
 
 ---
 
-## 8. GUI dearpygui — `openpulse/gui/`
+## 7. Configuration & profiles — `openpulse/config/`
 
-Boucle de rendu manuelle :
+- **pydantic** models: `AppSettings` (VID/PID, transport type, UDP host/port,
+  UI prefs), `DeviceConfig` (`sample_rate_hz`, `od_clamp`, `ol_lra_period`,
+  `failsafe_ms`, `amp_max`, `loss_policy`, `underrun_decay_ms`),
+  `MixerConfig`, `EffectParams` per effect, `Profile` (name, game, car-match
+  pattern, `device`, `mixer`, `effects{}`).
+- Storage: `%APPDATA%/OpenPulse/` (`settings.toml`, `profiles/*.toml`).
+  Bundled default profiles, copied on first launch (`ac-default`, `ac-gt3`,
+  `ac-formula`, …).
+- **Profile resolution**: on telemetry connect, read `carModel` (shared
+  memory) / `carName` (UDP handshake) → the profile whose pattern
+  (glob/regex) matches, else the game's default. Manual override in the GUI.
+  `Save` / `Save as` / `Duplicate` / `Revert`.
+- **Device guard rails**: clamp to the protocol's ranges (`link_control.c`).
+  *Warn* (without blocking) if `od_clamp > 0xC0` (thermal) or
+  `sample_rate_hz > 2000` (unneeded, BENCH.md). Show the frequency for
+  `ol_lra_period` (`f = 1e6/(olp·98.46)`) and the peak voltage for
+  `od_clamp` (`≈ 21.6 mV·od_clamp`) in plain terms. `ol_lra_period` behind an
+  "Advanced (hardware)" panel with the HARDWARE.md warning — it's a measured
+  constant.
+
+---
+
+## 8. dearpygui GUI — `openpulse/gui/`
+
+Manual render loop:
 `while dpg.is_dearpygui_running(): pull_snapshot(); update_widgets(); dpg.render_dearpygui_frame()`.
-Panneaux (fenêtres dockables) :
+Panels (dockable windows):
 
-1. **Connexion** — device (état, `fw x.y`, `proto vN` + ✓/✗, mode courant),
-   transport (USB / Mock), source télémétrie (Auto / Mém. partagée / UDP +
-   hôte:port), jeu + voiture + statut piste. Boutons Connecter / Déconnecter /
-   Rescan. Écran d'aide Zadig si l'interface 2 n'est pas réclamable.
-2. **Moniteur live** — scope de la forme d'onde de sortie (~2 s) + overlay des
-   contributions par effet ; afficheurs vitesse/régime/rapport, barres
-   throttle/brake, 4 cadrans de slip, vecteur G, pastilles de flags ; stats
-   device (fifo, ovr/unr, crc, gap, backlog, `failsafe_trips`, VBAT, OVER_TEMP/OC
-   en rouge, RTT).
-3. **Effets** — table : `[✓]` nom | gain | seuil(s) | fréq | courbe | meter de
-   contribution live | bouton **Test**. Groupés lit / événements. « Tout
-   couper », presets.
-4. **Mixeur / Master** — master gain, plafond du lit, limiteur (genou, ceiling),
-   noise gate (floor, hold, hystérésis), garde thermique (constante de temps,
-   seuil, foldback), gros VU de sortie + voyant d'écrêtage + jauge « budget
-   thermique ».
-5. **Config device** — `sample_rate_hz`, `failsafe_ms`, `amp_max`,
-   `loss_policy`, `underrun_decay_ms` ; volet Avancé : `od_clamp` (+ ~V),
-   `ol_lra_period` (+ ~Hz, warning). Bouton **Appliquer** → `SET_CONFIG`
-   (option : reset stats). Diff visuel app ↔ box.
-6. **Profils** — liste, charger/enregistrer/dupliquer, association voiture,
+1. **Connection** — device (status, `fw x.y`, `proto vN` + ✓/✗, current
+   mode), transport (USB / Mock), telemetry source (Auto / Shared memory /
+   UDP + host:port), game + car + track status. Connect / Disconnect /
+   Rescan buttons. A Zadig help screen if interface 2 isn't claimable.
+2. **Live monitor** — a scope of the output waveform (~2 s) + an overlay of
+   per-effect contributions; speed/rpm/gear readouts, throttle/brake bars, 4
+   slip gauges, G vector, flag chips; device stats (fifo, ovr/unr, crc, gap,
+   backlog, `failsafe_trips`, VBAT, OVER_TEMP/OC in red, RTT).
+3. **Effects** — a table: `[✓]` name | gain | threshold(s) | freq | curve |
+   live contribution meter | **Test** button. Grouped bed / event. "Mute
+   all", presets.
+4. **Mixer / Master** — master gain, bed ceiling, limiter (knee, ceiling),
+   noise gate (floor, hold, hysteresis), thermal guard (time constant,
+   threshold, foldback), a big output VU + a clip indicator + a "thermal
+   budget" gauge.
+5. **Device config** — `sample_rate_hz`, `failsafe_ms`, `amp_max`,
+   `loss_policy`, `underrun_decay_ms`; an Advanced panel: `od_clamp` (+ ~V),
+   `ol_lra_period` (+ ~Hz, warning). An **Apply** button → `SET_CONFIG`
+   (optional: reset stats). A visual diff between the app and the box.
+6. **Profiles** — list, load/save/duplicate, car association,
    import/export, auto-switch on/off.
-7. **Diagnostics** — journal box (`LOG` colorés par niveau), `FAULT` décodés,
-   compteurs proto, mini-bench (PING RTT n=100, « envoyer pattern test »,
-   « forcer IDLE »), trace des trames brutes (toggle),
-   **enregistrement/rejeu de télémétrie** (start/stop/charger + timeline).
+7. **Diagnostics** — box log (`LOG` color-coded by level), decoded `FAULT`s,
+   protocol counters, a mini-bench (PING RTT n=100, "send a test pattern",
+   "force IDLE"), a raw-frame trace toggle, **telemetry
+   recording/replay** (start/stop/load + timeline).
 
 ---
 
-## 9. Enregistrement / rejeu & mode simulateur
+## 9. Recording / replay & simulator mode
 
-- `telemetry/record.py` : `TelemetryRecorder` écrit les `TelemetryFrame`
-  (colonnes `.npz` ou msgpack) + méta (jeu, voiture, session).
-  `TelemetryPlayer` **est une `TelemetrySource`** qui rejoue un fichier en
-  temps réel (ou ×k, ou en boucle).
-- `SyntheticSource` : `TelemetrySource` pilotée par des sliders / scénarios
-  scriptés (« hotlap », « bloque l'avant », « tape un kerb », « part en
-  tête-à-queue ») → régler et démontrer les effets **sans le jeu**.
-- `tools/telemetry_capture.py` : dump live AC (les 2 sources) vers un
-  enregistrement, pour les fixtures de test.
-- `tools/waveform_preview.py` : passe un enregistrement dans le pipeline
-  hors-ligne → `.wav` + PNG, pour l'A/B de réglage et la non-régression.
+- `telemetry/record.py`: `TelemetryRecorder` writes `TelemetryFrame`s (`.npz`
+  or msgpack columns) + metadata (game, car, session). `TelemetryPlayer`
+  **is a `TelemetrySource`** that replays a file in real time (or ×k, or on
+  loop).
+- `SyntheticSource`: a `TelemetrySource` driven by sliders / scripted
+  scenarios ("hotlap", "lock the fronts", "hit a kerb", "spin out") → tune
+  and demo the effects **with no game**.
+- `tools/telemetry_capture.py`: dumps a live AC session (both sources) to a
+  recording, for test fixtures.
+- `tools/waveform_preview.py`: runs a recording through the pipeline offline
+  → `.wav` + PNG, for A/B tuning and regression checks.
 
 ---
 
-## 10. Tests (sans matériel, sans jeu) — `tests/`
+## 10. Tests (no hardware, no game) — `tests/`
 
-| Fichier | Couvre |
+| File | Covers |
 |---|---|
-| `test_protocol.py` | vecteur CRC `"123456789"→0xF4`, tailles structs (2/5/12/40/5), build/parse round-trip, trames malformées rejetées, pack `config_msg` (reprend l'intention de `firmware/tools/test/`) |
-| `test_ac_shared_memory.py` / `test_ac_udp.py` | parse de dumps fixtures → champs bruts, endianness, tolérance aux champs ajoutés en queue |
-| `test_normalize.py` | AC brut (2 sources) → `TelemetryFrame` équivalents sur une session fixture commune ; conversions d'unités ; `CapabilitySet` |
-| `test_derive.py` | vitesse suspension, `lock_ratio`, détection impact/jerk, `gear_changed` sur séquences synthétiques |
-| `test_effects.py` | par effet : borné `0..1` ; muet si désactivé ; muet si trigger absent ; RMS/pic dans la bande attendue si déclenché ; fréquence de modulation dominante (FFT) dans la bande déclarée ; continuité de phase entre blocs (pas de saut) |
-| `test_mixer.py` | limiteur jamais > 1,0 ; gate engage/relâche avec hystérésis ; ducking atténue le lit ; foldback thermique réduit le master sous charge soutenue ; OVER_TEMP → 0 |
-| `test_renderer.py` | quantification, tailles de batch, lookahead maintenu, maths du pacing, télémétrie périmée → rampe à 0 |
-| `test_pipeline_integration.py` | `MockTransport` + lap enregistré → N s → aucune exception, cadence de trames dans la tolérance, SEQ monotone, sortie bornée |
+| `test_protocol.py` | CRC vector `"123456789"→0xF4`, struct sizes (2/5/12/40/5), build/parse round-trip, malformed frames rejected, `config_msg` packing (mirrors the intent of `firmware/tools/test/`) |
+| `test_ac_shared_memory.py` / `test_ac_udp.py` | parsing fixture dumps → raw fields, endianness, tolerance to fields appended at the tail |
+| `test_normalize.py` | raw AC (both sources) → equivalent `TelemetryFrame`s on a shared fixture session; unit conversions; `CapabilitySet` |
+| `test_derive.py` | suspension velocity, `lock_ratio`, impact/jerk detection, `gear_changed` on synthetic sequences |
+| `test_effects.py` | per effect: bounded `0..1`; silent when disabled; silent when the trigger is absent; RMS/peak in the expected band when triggered; dominant modulation frequency (FFT) within the declared band; phase continuity across blocks (no jump) |
+| `test_mixer.py` | limiter never > 1.0; gate engages/releases with hysteresis; ducking attenuates the bed; thermal foldback reduces the master under sustained load; OVER_TEMP → 0 |
+| `test_renderer.py` | quantization, batch sizes, lookahead maintained, pacing math, stale telemetry → ramp to 0 |
+| `test_pipeline_integration.py` | `MockTransport` + a recorded lap → N s → no exceptions, frame cadence within tolerance, SEQ monotonic, bounded output |
 
-CI : `pytest` pur Python. Fixtures commitées dans `tests/fixtures/`.
+CI: pure-Python `pytest`. Fixtures committed under `tests/fixtures/`.
 
 ---
 
-## 11. Arborescence proposée
+## 11. Proposed layout
 
-> Phase A a livré `transport/` (`protocol.py`, `base.py`, `usb.py`, `mock.py`),
-> `box/session.py`, `core/clock.py`, `streamer.py`, `controller.py`, `config.py`,
-> `waveforms.py`, `gui/app.py`, `cli.py`, `app.py`. Le reste ci-dessous est la
-> cible.
+> Phase A shipped `transport/` (`protocol.py`, `base.py`, `usb.py`,
+> `mock.py`), `box/session.py`, `core/clock.py`, `streamer.py`,
+> `controller.py`, `config.py`, `waveforms.py`, `gui/app.py`, `cli.py`,
+> `app.py`. Everything below is the target.
 
 ```
 OpenPulse-app/
 ├── pyproject.toml                   Python ≥ 3.11
 ├── README.md
 ├── docs/
-│   ├── ARCHITECTURE.md              (ce document)
-│   ├── EFFECTS.md                   le langage vibratoire + catalogue + réglage
-│   ├── TELEMETRY.md                 maps AC mém. partagée + UDP, schéma normalisé
+│   ├── ARCHITECTURE.md              (this document)
+│   ├── EFFECTS.md                   the vibratory language + catalogue + tuning
+│   ├── TELEMETRY.md                 AC shared-mem + UDP field maps, normalized schema
 │   └── SETUP-WINDOWS.md             libusb / Zadig / WinUSB
 ├── src/openpulse/
-│   ├── app.py                       entrypoint : câble tout, possède les threads
+│   ├── app.py                       entrypoint: wires everything, owns the threads
 │   ├── core/       state.py  clock.py  logging.py
 │   ├── config/     models.py  store.py  defaults/*.toml
 │   ├── telemetry/
@@ -566,144 +568,153 @@ OpenPulse-app/
 └── tools/          telemetry_capture.py  waveform_preview.py
 ```
 
-Emplacement : `OpenPulse-app/` à côté de `OpenPulse-firmware/`. Même dépôt ou
-dépôt séparé — à décider (§14 Q3).
+Location: `OpenPulse-app/` next to `OpenPulse-firmware/`. Same repo or a
+separate one — decided (§14 Q3): separate.
 
 ---
 
-## 12. Packaging & plateforme
+## 12. Packaging & platform
 
-- Deps : `dearpygui`, `pyusb`, `numpy`, `pydantic`, `msgpack` (ou stdlib),
-  `tomllib`. Dev : `pytest`, `ruff`, `mypy`.
-- **Windows** (cible principale sim racing) : embarquer `libusb-1.0.dll`. Bind
-  **WinUSB/libusbK via Zadig sur l'interface 2**, une fois — guidé par l'app,
-  documenté. Disparaît quand firmware 3.6 (MS OS 2.0) atterrit.
-- Le port CDC (`COMx`, lignes `[R]`) est *optionnel* : `TYPE_LOG` + `STATUS_REP`
-  couvrent déjà le besoin. On peut l'ouvrir en lecture seule pour un onglet
-  diagnostic.
-- Distribution : `pyinstaller` one-folder → `OpenPulse.exe` (pas en phase 1).
-- **Linux / macOS** : `libusb-package` fournit le backend ; sous Linux une règle
-  udev peut être nécessaire pour réclamer l'interface sans privilèges. AC tourne
-  surtout sous Windows — le cas Linux/macOS vise le PC « box » qui reçoit la
-  **télémétrie UDP** d'un autre PC (la mém. partagée, elle, suppose le jeu
-  local ; sous Proton elle vit dans le préfixe wine).
+- Deps: `dearpygui`, `pyusb`, `numpy`, `pydantic`, `msgpack` (or stdlib),
+  `tomllib`. Dev: `pytest`, `ruff`, `mypy`.
+- **Windows** (the main sim-racing target): bundle `libusb-1.0.dll`. Bind
+  **WinUSB/libusbK via Zadig on interface 2**, once — guided by the app,
+  documented. Goes away once firmware 3.6 (MS OS 2.0) lands.
+- The CDC port (`COMx`, `[R]` lines) is *optional*: `TYPE_LOG` + `STATUS_REP`
+  already cover the need. It can be opened read-only for a diagnostics tab.
+- Distribution: `pyinstaller` one-folder → `OpenPulse.exe` (not phase 1).
+- **Linux / macOS**: `libusb-package` provides the backend; on Linux a udev
+  rule may be needed to claim the interface without privileges. AC mostly
+  runs on Windows — the Linux/macOS case targets the "box" PC that receives
+  **UDP telemetry** from another PC (shared memory assumes the game is
+  local; under Proton it lives inside the wine prefix).
 
 ---
 
-## 13. Feuille de route (incréments livrables)
+## 13. Roadmap (shippable increments)
 
-Style ROADMAP firmware : chaque phase compile, tourne, et a un critère « fait ».
+Same style as the firmware ROADMAP: every phase compiles, runs, and has a
+"done" criterion.
 
-### Phase A — Squelette + transport (parité avec `openpulse_send.py`)  —  ✅ FAIT
-- `transport/protocol.py` (miroir bit-identique de `proto.h` + auto-tests),
-  `transport/base.py` (`Transport` ABC), `transport/usb.py` (`UsbVendorTransport`
-  + backend `libusb-package`), `transport/mock.py` (`MockTransport`, modèle
-  comportemental de la box).
-- `box/session.py` (`BoxSession` : handshake, version-gate, thread lecteur, RTT),
-  `core/clock.py` (résolution timer OS + `Pacer`), `streamer.py`
-  (`SampleStreamer`, boucle de pacing temps-réel), `config.py` (`DeviceConfig`
-  pydantic aux plages de `link_control.c`), `waveforms.py`.
-- `openpulse-cli` — streamer headless, parité avec `openpulse_send.py`
+### Phase A — Skeleton + transport (parity with `openpulse_send.py`)  —  ✅ DONE
+- `transport/protocol.py` (bit-identical mirror of `proto.h` + self-tests),
+  `transport/base.py` (`Transport` ABC), `transport/usb.py`
+  (`UsbVendorTransport` + `libusb-package` backend), `transport/mock.py`
+  (`MockTransport`, a behavioural model of the box).
+- `box/session.py` (`BoxSession`: handshake, version gate, reader thread,
+  RTT), `core/clock.py` (OS timer resolution + `Pacer`), `streamer.py`
+  (`SampleStreamer`, the real-time pacing loop), `config.py` (`DeviceConfig`
+  pydantic model matching `link_control.c`'s ranges), `waveforms.py`.
+- `openpulse-cli` — headless streamer, parity with `openpulse_send.py`
   (`--transport usb|mock`, `--wave`, `--list`, dashboard, Ctrl-C → IDLE).
-- GUI dearpygui (`gui/app.py`, `controller.py`) : panneaux **Connexion**
-  (transport, VID/PID, `sample_rate_hz`/`failsafe_ms`, waveform, start/stop) +
-  **Diagnostics** (table STATUS, RTT min/p50/p95, FAULT décodés, journal box,
-  bouton Ping×50).
-- **Tests** (`pytest`, 100 % sans matériel) : `test_protocol`, `test_mock`,
+- dearpygui GUI (`gui/app.py`, `controller.py`): **Connection** panel
+  (transport, VID/PID, `sample_rate_hz`/`failsafe_ms`, waveform, start/stop)
+  + **Diagnostics** panel (STATUS table, RTT min/p50/p95, decoded FAULTs, box
+  log, Ping×50 button).
+- **Tests** (`pytest`, 100% no hardware): `test_protocol`, `test_mock`,
   `test_session`, `test_streamer`, `test_controller`, `test_gui_smoke`.
-- **Fait** : box (réelle ou mock) pilotée depuis l'app, dashboard live, contrôle
-  de version au `PONG` (`ProtocolMismatch`), arrêt propre (`SET_MODE IDLE`).
+- **Done**: box (real or mock) driven from the app, live dashboard, version
+  check on `PONG` (`ProtocolMismatch`), clean shutdown (`SET_MODE IDLE`).
 
-### Phase B — Télémétrie Assetto Corsa  —  ✅ FAIT (calibré sur une capture réelle)
-- `telemetry/frame.py` (`TelemetryFrame` gelée, ~50 champs SI + `Cap` IntFlag),
-  `telemetry/base.py` (`TelemetrySource` ABC, `SessionInfo`, `SourceStatus`).
-- `telemetry/ac/structs.py` (ctypes, portés de mdjarv (SHM `Pack=4`) + rickwest
-  (UDP `RTCarInfo` 328 o) — tailles/offsets assertés), `ac/shared_memory.py`
-  (mmap `acpmf_*`, Windows), `ac/udp.py` (handshake :9996 + `SUBSCRIBE_UPDATE`,
-  multi-OS), `ac/normalize.py` (le seul module qui connaît les unités d'AC ;
-  hypothèses tagguées `# VERIFY`).
-- `telemetry/derive.py` (`Deriver` : dt, `lock_ratio`, `susp_vel`, jerk/impact,
-  `gear_change`, `rev_limiter`, estimation ABS/TC, **`grip_scrub`**).
-- `telemetry/synthetic.py` (`SyntheticSource` : 6 scénarios dont `grip_scrub`),
-  `telemetry/record.py` (`TelemetryRecorder` JSONL + `ReplaySource`),
-  `telemetry/registry.py` (`build_source` + auto-détection SHM→UDP),
-  `telemetry/controller.py` (`TelemetryController` : thread, snapshot, record).
-- `tools/` : `openpulse-capture` (dump + rapport sanity + `--raw`),
-  `openpulse-analyze` (percentiles d'une capture → calibration des seuils),
-  `openpulse-trim` (grosse capture → fixture compacte commitable),
-  `openpulse-bridge` + `debugmap.py` (**pont debug** : streame un scalaire de
-  télémétrie — `grip_scrub`, `lockup`, `rpm`… — directement vers la box).
-- GUI : fenêtre **Telemetry** (source, moniteur temps réel : vitesse, régime,
-  4 roues × 9 métriques, `grip_scrub` en barre, flags ; enregistrement ; pont
-  debug vers la box).
-- Tests : `test_ac_structs`, `test_normalize`, `test_derive`, `test_synthetic`,
-  `test_record`, `test_telemetry_controller`, `test_ac_fixture` (tourne sur
-  `tests/fixtures/ac_shm_lap.jsonl`, une vraie capture GT trimée).
-- **Calibré** sur une capture mémoire-partagée réelle (40 s, GT) : unités et axes
-  AC confirmés (voir [TELEMETRY.md](TELEMETRY.md)), `impact_excess_g` et
-  `scrub_wheelslip_*` réglés sur les percentiles observés. **Reste ouvert** :
-  la même passe côté UDP (offset `gear`), l'index yaw de `localAngularVelocity`.
+### Phase B — Assetto Corsa telemetry  —  ✅ DONE (calibrated against a real capture)
+- `telemetry/frame.py` (frozen `TelemetryFrame`, ~50 SI fields + `Cap`
+  IntFlag), `telemetry/base.py` (`TelemetrySource` ABC, `SessionInfo`,
+  `SourceStatus`).
+- `telemetry/ac/structs.py` (ctypes, ported from mdjarv (shared memory
+  `Pack=4`) + rickwest (UDP `RTCarInfo` 328 B) — sizes/offsets asserted),
+  `ac/shared_memory.py` (mmap of `acpmf_*`, Windows), `ac/udp.py` (handshake
+  on :9996 + `SUBSCRIBE_UPDATE`, multi-OS), `ac/normalize.py` (the only
+  module that knows AC's units; assumptions tagged `# VERIFY`).
+- `telemetry/derive.py` (`Deriver`: dt, `lock_ratio`, `susp_vel`,
+  jerk/impact, `gear_change`, `rev_limiter`, ABS/TC estimation,
+  **`grip_scrub`**).
+- `telemetry/synthetic.py` (`SyntheticSource`: 6 scenarios including
+  `grip_scrub`), `telemetry/record.py` (`TelemetryRecorder` JSONL +
+  `ReplaySource`), `telemetry/registry.py` (`build_source` + SHM→UDP
+  auto-detection), `telemetry/controller.py` (`TelemetryController`: thread,
+  snapshot, recording).
+- `tools/`: `openpulse-capture` (dump + sanity report + `--raw`),
+  `openpulse-analyze` (percentiles of a capture → threshold calibration),
+  `openpulse-trim` (big capture → a small committable fixture),
+  `openpulse-bridge` + `debugmap.py` (**debug bridge**: streams one
+  telemetry scalar — `grip_scrub`, `lockup`, `rpm`… — straight to the box).
+- GUI: **Telemetry** window (source, live monitor: speed, rpm, 4 wheels × 9
+  metrics, `grip_scrub` as a bar, flags; recording; debug bridge to the
+  box).
+- Tests: `test_ac_structs`, `test_normalize`, `test_derive`,
+  `test_synthetic`, `test_record`, `test_telemetry_controller`,
+  `test_ac_fixture` (runs against `tests/fixtures/ac_shm_lap.jsonl`, a
+  trimmed real GT capture).
+- **Calibrated** against a real shared-memory capture (40 s, GT): AC units
+  and axes confirmed (see [TELEMETRY.md](TELEMETRY.md)), `impact_excess_g`
+  and `scrub_wheelslip_*` tuned to the observed percentiles. **Still open**:
+  the same pass on the UDP side (the `gear` offset), the yaw index of
+  `localAngularVelocity`.
 
-### Phase C — Moteur d'effets v1  —  ✅ FAIT (v1, tuning au ressenti à venir)
+### Phase C — Effect engine v1  —  ✅ DONE (v1, feel-tuning still to come)
 - `engine/effect.py` (`Effect` ABC + `EffectContext`/`EffectBlock`),
-  `engine/dsp.py` (osc phase-continu, bruit de bande, enveloppe one-shot, gate
-  hystérétique, soft-limiter, intégrateur d'énergie), `engine/params.py`
-  (modèles pydantic par effet + mixeur, édités à chaud par la GUI).
-- **12 effets** dans `engine/effects/` : `road`, `engine`, `grip_scrub`,
+  `engine/dsp.py` (phase-continuous osc, band noise, one-shot envelope,
+  hysteretic gate, soft limiter, energy integrator), `engine/params.py`
+  (pydantic models per effect + mixer, edited live from the GUI).
+- **12 effects** in `engine/effects/`: `road`, `engine`, `grip_scrub`,
   `lockup`, `wheelspin`, `abs_pulse`, `tc_cut`, `kerb`, `gearshift`,
-  `rev_limiter`, `impact`, `offtrack` (voir [EFFECTS.md](EFFECTS.md)).
-- `engine/mixer.py` : lit ambiant (duckable) + lit avant-plan (`grip_scrub`) +
-  événements → ducking → master → soft-limiter → noise gate → garde thermique
-  (leaky energy + `external_limit` depuis `OVER_TEMP`/`FAULT_DRV_OT` de la box)
-  → gamma de sortie.
-- `engine/pipeline.py` : dernière frame (ZOH) → effets (par échantillon) →
-  mixeur → un bloc 0..1 ; rampe `enable` à 0 si télémétrie périmée / hors piste.
-- `streamer.PipelineStreamer` : bloc → quantize int8 → box, même pacing que Phase A.
-- `tools/preview.py` (`openpulse-preview`) : rejoue une capture dans le moteur
-  hors-ligne → WAV (enveloppe × porteuse 158,7 Hz) + rapport par effet.
-- GUI : fenêtres **Effects** (par effet : on/off, gain, params auto-générés,
-  meter, bouton Test) et **Mixer / output** (params mixeur + VU + scope) ;
-  bouton « Effect engine » dans la fenêtre Telemetry.
-- Tests : `test_dsp`, `test_effects` (par effet : borné, muet si off / trigger
-  absent, présent au bon scénario), `test_mixer`, `test_pipeline` (scénarios +
-  le vrai tour `ac_shm_lap.jsonl`). 120 tests.
-- **Calibré** sur `ac_shm_lap.jsonl` : `openpulse-preview` → RMS ≈ 0,37 (sous
-  `thermal_soft`), transitoires ~1,0, `tc_cut`/`kerb`/`wheelspin` ramenés à des
-  taux d'activation réalistes. Reste : la passe de tuning au ressenti sur la box
-  (dont la pente du `grip_scrub`).
+  `rev_limiter`, `impact`, `offtrack` (see [EFFECTS.md](EFFECTS.md)).
+- `engine/mixer.py`: ambient bed (duckable) + foreground bed (`grip_scrub`)
+  + events → ducking → master → soft limiter → noise gate → thermal guard
+  (leaky energy + `external_limit` from the box's `OVER_TEMP`/
+  `FAULT_DRV_OT`) → output gamma.
+- `engine/pipeline.py`: latest frame (ZOH) → per-sample effect rendering →
+  mix → one 0..1 block; `enable` ramps to 0 on stale telemetry / off track.
+- `streamer.PipelineStreamer`: block → int8 quantize → box, same pacing as
+  Phase A.
+- `tools/preview.py` (`openpulse-preview`): replays a capture through the
+  engine offline → WAV (envelope × 158.7 Hz carrier) + a per-effect report.
+- GUI: **Effects** window (per effect: on/off, gain, auto-generated params,
+  meter, Test button) and **Mixer / output** window (mixer params + VU +
+  scope); an "Effect engine" button in the Telemetry window.
+- Tests: `test_dsp`, `test_effects` (per effect: bounded, silent when off /
+  trigger absent, present for the right scenario), `test_mixer`,
+  `test_pipeline` (scenarios + the real `ac_shm_lap.jsonl` lap). 120 tests.
+- **Calibrated** against `ac_shm_lap.jsonl`: `openpulse-preview` → RMS ≈
+  0.37 (below `thermal_soft`), transients ~1.0, `tc_cut`/`kerb`/`wheelspin`
+  brought down to realistic activation rates. Left: the feel-tuning pass on
+  the box (including the `grip_scrub` slope).
 
-### Phase D — Profils + garde thermique + finition
-- `thermal.py`, limiteur/gate finaux, profils par voiture (auto-switch sur
-  `carModel`), panneau **Config device** (`SET_CONFIG` + garde-fous),
-  packaging PyInstaller, `docs/SETUP-WINDOWS.md`.
-- **Fait** : usage réel sur plusieurs voitures, thermiquement sûr, installable
-  par un tiers.
+### Phase D — Profiles + thermal guard + polish
+- `thermal.py`, final limiter/gate, per-car profiles (auto-switch on
+  `carModel`), a **Device config** panel (`SET_CONFIG` + guard rails),
+  PyInstaller packaging, `docs/SETUP-WINDOWS.md`.
+- **Done**: real use across several cars, thermally safe, installable by a
+  third party.
 
-### Phase E — Extensibilité (valider l'abstraction)
-- 2ᵉ jeu (p. ex. ACC, ou rFactor 2 / iRacing) → prouve que seule une
-  `TelemetrySource` + un normaliseur suffisent.
-- SimHub comme source de télémétrie alternative.
-- Mode `ENVELOPE` (utile pour la future RF, Phase 4 firmware).
-- Anticiper le multi-actionneur (le proto gagnerait un octet de canal, la FIFO
-  deviendrait par canal — déjà noté dans ROADMAP firmware « Deferred »).
+### Phase E — Extensibility (validate the abstraction)
+- A 2nd game (e.g. ACC, or rFactor 2 / iRacing) → proves that only a
+  `TelemetrySource` + a normalizer are needed.
+- SimHub as an alternative telemetry source.
+- `ENVELOPE` mode (useful for the future RF, firmware Phase 4).
+- Anticipate multi-actuator (the protocol would gain a channel byte, the
+  FIFO would become per-channel — already noted in the firmware ROADMAP's
+  "Deferred" section).
 
 ---
 
-## 14. Points ouverts
+## 14. Open questions
 
-**Actés** (cf. en-tête) : « DMA » = mémoire partagée officielle d'AC · dépôt
-séparé · multi-OS (Windows/Linux/macOS) · libs tierces OK.
+**Decided** (see header): "DMA" = AC's official shared memory · separate
+repo · multi-OS (Windows/Linux/macOS) · third-party libs OK.
 
-**Restent à trancher avant Phase C** :
+**Still to settle before Phase C** (now resolved in practice — kept here for
+history):
 
-1. **Périmètre effets v1** : le catalogue §4.3 te convient ? Priorités si on doit
-   en couper ?
-2. **Échantillons négatifs (anti-phase)** : autorisés pour un edge d'impact net,
-   ou strictement `0..127` en v1 ?
-3. **Mono-actionneur** : on ne prévoit rien pour le multi-canal maintenant (juste
-   ne pas se fermer la porte) ?
-4. **SimHub** : gardé en Phase E comme *une source parmi d'autres*, ou prioritaire ?
-5. **Synchro `proto`** : les deux dépôts étant séparés, la synchro
-   `transport/protocol.py` ↔ `firmware/src/link/proto.h` est manuelle (règle
-   documentée + auto-tests de tailles/CRC). Suffisant, ou on veut un script de
-   vérification qui pointe vers un checkout du firmware ?
+1. **v1 effect scope**: does the §4.3 catalogue work for you? Priorities if
+   some need cutting?
+2. **Negative samples (anti-phase)**: allowed for a crisp impact edge, or
+   strictly `0..127` in v1? — *decided: `0..127` for v1.*
+3. **Single actuator**: nothing planned for multi-channel for now (just
+   don't close the door)?
+4. **SimHub**: kept in Phase E as *one source among others*, or a priority? —
+   *decided: Phase E.*
+5. **`proto` sync**: with the two repos separate, syncing
+   `transport/protocol.py` ↔ `firmware/src/link/proto.h` is manual
+   (documented rule + size/CRC self-tests). Good enough, or do we want a
+   verification script that points at a firmware checkout?

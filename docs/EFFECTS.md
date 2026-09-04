@@ -21,7 +21,7 @@ defaults in that spirit when tuning.
 | `tc_cut` | event | ~16 Hz stutter | light saccade | `tc_active` + `throttle` |
 | `kerb` | event | elevated + ~38 Hz crunch | sharp burst | axle `susp_vel` spike, `off_track_wheels` |
 | `gearshift` | event | 40 ms one-shot | one sharp thump (up ≠ down) | `gear_change` edge |
-| `rev_limiter` | event | ~9 Hz hard square | butte bouncing | `rev_limiter` |
+| `rev_limiter` | event | ~9 Hz hard square | limiter bounce | `rev_limiter` |
 | `impact` | event | 40–120 ms one-shot | a hit | `impact_g` rising edge, `damage` delta |
 | `offtrack` | event | 8–22 Hz coarse noise | grass/gravel rumble | `off_track_wheels` (SHM) / `tyre_dirt` (UDP) |
 
