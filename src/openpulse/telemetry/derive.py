@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from openpulse.telemetry.frame import Cap, TelemetryFrame, Wheel4
 
@@ -24,35 +24,39 @@ _DT_FLOOR = 1e-3  # s — below this a "frame" is a duplicate poll; don't differ
 
 
 class DeriveConfig(BaseModel):
-    default_tyre_radius_m: float = 0.33
-    susp_vel_lp_hz: float = 30.0
-    accel_lp_hz: float = 40.0
+    default_tyre_radius_m: float = Field(0.33, ge=0.15, le=0.5)
+    susp_vel_lp_hz: float = Field(30.0, ge=1.0, le=100.0)
+    accel_lp_hz: float = Field(40.0, ge=1.0, le=150.0)
     # impact: keyed on |accel| rising above a slow baseline, NOT raw jerk
     # (a real AC capture on kerbs shows jerk routinely at 30-100 g/s and
     # spiking to thousands when a wheel drops off track).
-    impact_baseline_hz: float = 1.5
-    impact_excess_g: float = 4.0    # calibrated: |accel| p95≈1.7, p99≈2.2, crash 8-14 g
-    impact_hold_s: float = 0.10
-    impact_cooldown_s: float = 0.18
-    impact_decay_s: float = 0.15
-    limiter_frac: float = 0.992
-    lock_ratio_min_speed_ms: float = 1.5
-    # grip scrub: nd_slip near/above 1.0 = at the limit (UDP)
-    scrub_nd_lo: float = 0.85
-    scrub_nd_hi: float = 1.15
+    impact_baseline_hz: float = Field(1.5, ge=0.1, le=10.0)
+    impact_excess_g: float = Field(4.0, ge=0.5, le=15.0)   # calibrated: |accel| p95≈1.7, p99≈2.2, crash 8-14 g
+    impact_hold_s: float = Field(0.10, ge=0.01, le=1.0)
+    impact_cooldown_s: float = Field(0.18, ge=0.01, le=2.0)
+    impact_decay_s: float = Field(0.15, ge=0.01, le=2.0)
+    limiter_frac: float = Field(0.992, ge=0.8, le=1.0)
+    lock_ratio_min_speed_ms: float = Field(1.5, ge=0.1, le=10.0)
+    # grip scrub: nd_slip near/above 1.0 = at the limit (UDP). This is the
+    # DERIVED-level minimum: below scrub_nd_lo the raw signal counts as zero
+    # grip_scrub, before the grip_scrub effect's own in_lo/in_hi remap ever
+    # sees it (engine/params.py GripScrubParams — see docs/EFFECTS.md).
+    scrub_nd_lo: float = Field(0.85, ge=0.0, le=2.0)
+    scrub_nd_hi: float = Field(1.15, ge=0.0, le=3.0)
     # grip scrub fallback: AC WheelSlip (contact-patch slip speed). Calibrated
     # from a real lap: combined_slip.max p50≈0.74, p90≈1.8, p99≈8.4 (slide).
-    # lo/hi span the "squealing near the limit, not yet sliding" band.
-    scrub_wheelslip_lo: float = 0.8
-    scrub_wheelslip_hi: float = 3.5
+    # lo/hi span the "squealing near the limit, not yet sliding" band. This is
+    # the minimum to adjust when driving off shared memory (no nd_slip).
+    scrub_wheelslip_lo: float = Field(0.8, ge=0.0, le=5.0)
+    scrub_wheelslip_hi: float = Field(3.5, ge=0.0, le=15.0)
     # rough ABS / TC estimation when the source has no flag
-    abs_est_brake_min: float = 0.35
-    abs_est_lock_lo: float = 0.55
-    abs_est_lock_hi: float = 0.97
-    tc_est_throttle_min: float = 0.55
-    tc_est_spin_ratio: float = 1.14   # real lap: rear lock_ratio p90≈1.09, p95≈1.13
+    abs_est_brake_min: float = Field(0.35, ge=0.0, le=1.0)
+    abs_est_lock_lo: float = Field(0.55, ge=0.0, le=1.0)
+    abs_est_lock_hi: float = Field(0.97, ge=0.0, le=1.5)
+    tc_est_throttle_min: float = Field(0.55, ge=0.0, le=1.0)
+    tc_est_spin_ratio: float = Field(1.14, ge=1.0, le=3.0)   # real lap: rear lock_ratio p90≈1.09, p95≈1.13
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
 def _lp_alpha(fc_hz: float, dt: float) -> float:

@@ -242,6 +242,13 @@ class OpenPulseGui:
                                 dpg.add_text("-", tag=f"tw_{key}_{i}")
 
             dpg.add_separator()
+            with dpg.collapsing_header(label="Derive thresholds (grip_scrub, impact, lockup, ABS/TC...)"):
+                dpg.add_text(
+                    "grip_scrub minimum: scrub_wheelslip_lo (shared memory) / scrub_nd_lo (UDP) below.",
+                    color=(150, 150, 150), wrap=860,
+                )
+                build_param_editor(self.settings.telemetry.derive, "dv", skip=(), width=210)
+            dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_text("-> box:")
                 dpg.add_button(label="Effect engine", callback=self._on_engine)
