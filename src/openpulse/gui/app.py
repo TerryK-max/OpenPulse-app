@@ -271,7 +271,7 @@ class OpenPulseGui:
                     build_param_editor(model, f"fx_{cls.id}", width=210)
 
     def _build_mixer(self) -> None:
-        with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=270):
+        with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=310):
             dpg.add_checkbox(
                 label="bench mode (run even when not on track)", tag="mx_force",
                 default_value=self.settings.engine.force_enable,
@@ -282,7 +282,11 @@ class OpenPulseGui:
             dpg.add_text("-", tag="mx_status", wrap=360)
             dpg.add_text("output")
             dpg.add_progress_bar(tag="mx_vu", width=340)
-            with dpg.plot(tag="mx_scope", height=90, width=340, no_menus=True):
+            dpg.add_slider_float(
+                label="scope window (s)", tag="mx_scope_window", width=210,
+                default_value=2.0, min_value=0.3, max_value=10.0, clamped=True,
+            )
+            with dpg.plot(tag="mx_scope", height=110, width=340, no_menus=True):
                 dpg.add_plot_axis(dpg.mvXAxis, no_tick_labels=True, tag="mx_x")
                 dpg.add_plot_axis(dpg.mvYAxis, tag="mx_y")
                 dpg.set_axis_limits("mx_y", 0.0, 1.0)
@@ -397,11 +401,14 @@ class OpenPulseGui:
         for cid, lvl in m.effect_levels.items():
             if dpg.does_item_exist(f"fx_meter_{cid}"):
                 dpg.set_value(f"fx_meter_{cid}", f"{lvl:.2f}")
-        hist = pipe.history()
+        window_s = dpg.get_value("mx_scope_window")
+        hist = pipe.history(seconds=window_s)
         if hist:
-            n = len(hist)
-            dpg.set_value("mx_series", [list(range(n)), hist])
-            dpg.set_axis_limits("mx_x", 0, max(64, n))
+            t0 = hist[0][0]
+            xs = [t - t0 for t, _ in hist]
+            ys = [v for _, v in hist]
+            dpg.set_value("mx_series", [xs, ys])
+            dpg.set_axis_limits("mx_x", 0.0, max(window_s, xs[-1]))
 
     # -- run ---------------------------------------------------------- #
     def run(self) -> None:

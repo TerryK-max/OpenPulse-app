@@ -50,7 +50,10 @@ class Pipeline:
         self._enable = 0.0
         self._external_limit = 1.0
         self._meters = PipelineMeters()
-        self._history: deque[float] = deque(maxlen=4096)   # decimated output for the GUI scope
+        # (t_seconds, sample) — one point per block (decimated), for the GUI scope.
+        # maxlen is generous (covers ~10 s even at a fast ~2 kHz block rate); the
+        # GUI windows this down to a few seconds via history(seconds=...).
+        self._history: deque[tuple[float, float]] = deque(maxlen=20000)
 
     # -- inputs ---------------------------------------------------------- #
     def set_frame(self, frame: TelemetryFrame | None) -> None:
@@ -124,15 +127,27 @@ class Pipeline:
             blocks=self._meters.blocks + 1,
         )
         if sig.size:
-            self._history.append(float(sig[-1]))
+            self._history.append((self._sample_idx / fs, float(sig[-1])))
         return sig
 
     # -- outputs ------------------------------------------------------ #
     def meters(self) -> PipelineMeters:
         return self._meters
 
-    def history(self) -> list[float]:
-        return list(self._history)
+    def history(self, seconds: float | None = None) -> list[tuple[float, float]]:
+        """(t_seconds, sample) points, oldest first. ``seconds`` windows it down
+        to the trailing N seconds (None = the whole buffer)."""
+        hist = self._history
+        if not hist or seconds is None:
+            return list(hist)
+        t_start = hist[-1][0] - seconds
+        out: list[tuple[float, float]] = []
+        for point in reversed(hist):
+            if point[0] < t_start:
+                break
+            out.append(point)
+        out.reverse()
+        return out
 
     def trigger_test(self, effect_id: str) -> None:
         """GUI 'Test' button — nudge an effect's telemetry-independent trigger."""
