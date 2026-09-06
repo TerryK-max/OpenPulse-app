@@ -98,4 +98,4 @@ pytest          # 100% software, no game or box needed
 
 ## Licence
 
-Apache-2.0.
+Apache-2.0 for the project's own code — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
