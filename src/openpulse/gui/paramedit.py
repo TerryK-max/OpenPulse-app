@@ -35,22 +35,31 @@ def build_param_editor(model, tag_prefix: str, *, skip: tuple[str, ...] = ("enab
         val = getattr(model, name)
         tag = f"{tag_prefix}__{name}"
 
-        def _cb(sender, app_data, user_data, _m=model, _n=name, _t=tag):
-            try:
-                setattr(_m, _n, dpg.get_value(_t))
-            except Exception:
-                dpg.set_value(_t, getattr(_m, _n))  # revert on validation error
-
+        # dearpygui's callback runner counts the callback's parameters and fills
+        # anything past (sender, app_data, user_data) with None — it *overrides*
+        # default args. So the field/model reference must travel in user_data,
+        # and the callback must take exactly three params.
         if isinstance(val, bool):
-            dpg.add_checkbox(label=name, tag=tag, default_value=val, callback=_cb)
+            dpg.add_checkbox(label=name, tag=tag, default_value=val,
+                             user_data=(model, name), callback=_write_field)
         elif isinstance(val, (int, float)):
             lo, hi = _bounds(fi, float(val))
             dpg.add_slider_float(
                 label=name, tag=tag, default_value=float(val),
-                min_value=lo, max_value=hi, width=width, callback=_cb, clamped=True,
+                min_value=lo, max_value=hi, width=width, clamped=True,
+                user_data=(model, name), callback=_write_field,
             )
         elif isinstance(val, str):
-            dpg.add_input_text(label=name, tag=tag, default_value=val, width=width, callback=_cb)
+            dpg.add_input_text(label=name, tag=tag, default_value=val, width=width,
+                               user_data=(model, name), callback=_write_field)
+
+
+def _write_field(sender, app_data, user_data) -> None:
+    model, name = user_data
+    try:
+        setattr(model, name, app_data)
+    except Exception:
+        dpg.set_value(sender, getattr(model, name))  # revert on validation error
 
 
 def refresh_param_editor(model, tag_prefix: str, *, skip: tuple[str, ...] = ("enabled",)) -> None:

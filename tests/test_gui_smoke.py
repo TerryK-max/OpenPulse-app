@@ -3,6 +3,7 @@
 Skipped where no display / GPU context is available (headless CI).
 """
 
+import inspect
 import time
 
 import pytest
@@ -11,6 +12,16 @@ dpg = pytest.importorskip("dearpygui.dearpygui")
 
 from openpulse.config import AppSettings  # noqa: E402
 from openpulse.gui.app import OpenPulseGui  # noqa: E402
+
+
+def _dpg_dispatch(tag, app_data):
+    """Invoke a widget callback the way dearpygui's runner does: build args from
+    (sender, app_data, user_data), truncated/padded to the callback's parameter
+    count — so extra params (incl. default args) are overridden with None."""
+    cb = dpg.get_item_callback(tag)
+    job = [tag, app_data, dpg.get_item_user_data(tag)]
+    n = len(inspect.signature(cb).parameters)
+    cb(*[job[i] if i < len(job) else None for i in range(n)])
 
 
 def test_gui_builds_and_streams():
@@ -50,6 +61,23 @@ def test_gui_builds_and_streams():
         assert pipe is not None
         m = pipe.meters()
         assert 0.0 <= m.output_peak <= 1.0 and m.blocks > 10
+
+        # a real checkbox click routes through dearpygui's arg-count trampoline,
+        # which overrides default args with None — the callback must survive that
+        # and actually flip the shared param model (regression: it did not).
+        eff = gui.settings.engine.effects
+        assert eff.road.enabled is True
+        dpg.set_value("fx_road__enabled", False)
+        _dpg_dispatch("fx_road__enabled", False)
+        assert eff.road.enabled is False
+        for _ in range(30):
+            gui.update()
+            dpg.render_dearpygui_frame()
+        assert pipe.meters().effect_levels["road"] == 0.0
+
+        # a param slider must write through too
+        _dpg_dispatch("fx_grip_scrub__ceiling", 0.9)
+        assert eff.grip_scrub.ceiling == pytest.approx(0.9)
     finally:
         gui.controller.disconnect()
         gui.telem.stop()

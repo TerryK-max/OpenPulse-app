@@ -267,15 +267,22 @@ class OpenPulseGui:
                 model = getattr(eff, cls.id)
                 with dpg.collapsing_header(label=f"{cls.id}  ({cls.kind})", tag=f"fx_hdr_{cls.id}"):
                     with dpg.group(horizontal=True):
+                        # context travels in user_data — dearpygui overrides any
+                        # extra callback params (default args included) with None.
                         dpg.add_checkbox(
                             label="on", tag=f"fx_{cls.id}__enabled", default_value=model.enabled,
-                            callback=lambda s, a, u, m=model, t=f"fx_{cls.id}__enabled": setattr(
-                                m, "enabled", dpg.get_value(t)),
+                            user_data=cls.id, callback=self._on_effect_toggle,
                         )
-                        dpg.add_button(label="Test", callback=lambda s, a, u, cid=cls.id:
-                                       self.controller.trigger_effect_test(cid))
+                        dpg.add_button(label="Test", user_data=cls.id,
+                                       callback=self._on_effect_test)
                         dpg.add_text("-", tag=f"fx_meter_{cls.id}")
                     build_param_editor(model, f"fx_{cls.id}", width=210)
+
+    def _on_effect_toggle(self, sender, app_data, user_data) -> None:
+        getattr(self.settings.engine.effects, user_data).enabled = bool(app_data)
+
+    def _on_effect_test(self, sender, app_data, user_data) -> None:
+        self.controller.trigger_effect_test(user_data)
 
     def _build_mixer(self) -> None:
         with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=310):
@@ -405,9 +412,14 @@ class OpenPulseGui:
             f"thermal {m.thermal_gain:.2f} (E {m.thermal_energy:.3f})"
             + ("" if m.telemetry_fresh else "  [telemetry stale]"),
         )
+        eff_cfg = self.settings.engine.effects
         for cid, lvl in m.effect_levels.items():
             if dpg.does_item_exist(f"fx_meter_{cid}"):
-                dpg.set_value(f"fx_meter_{cid}", f"{lvl:.2f}")
+                on = getattr(eff_cfg, cid).enabled
+                dpg.set_value(f"fx_meter_{cid}", f"{lvl:.2f}" if on else "off")
+                dpg.configure_item(f"fx_meter_{cid}",
+                                   color=(150, 150, 150) if not on else
+                                   (230, 160, 90) if lvl > 0.01 else (120, 120, 120))
         window_s = dpg.get_value("mx_scope_window")
         hist = pipe.history(seconds=window_s)
         if hist:
