@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from openpulse.engine.dsp import OneShot
@@ -14,6 +16,12 @@ class GearshiftEffect(Effect):
 
     def reset(self) -> None:
         self._env = OneShot()
+
+    test_duration_s = 1.2
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        change = 1 if t0 <= 0.0 < t1 else (-1 if t0 <= 0.6 < t1 else 0)
+        return replace(f, on_track=True, paused=False, gear_change=change)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

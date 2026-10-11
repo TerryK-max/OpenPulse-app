@@ -35,6 +35,8 @@ class PipelineMeters:
     effect_levels: dict[str, float] = field(default_factory=dict)
     telemetry_fresh: bool = False
     blocks: int = 0
+    testing: str = ""            # effect id currently under the GUI "Test" button
+    test_remaining_s: float = 0.0
 
 
 class Pipeline:
@@ -50,6 +52,9 @@ class Pipeline:
         self._enable = 0.0
         self._external_limit = 1.0
         self._meters = PipelineMeters()
+        # GUI "Test" button: [effect, start sample index (None until the first
+        # block), duration in seconds]. Solo-plays that one effect for a moment.
+        self._test: list | None = None
         # (t_seconds, sample) — one point per block (decimated), for the GUI scope.
         # maxlen is generous (covers ~10 s even at a fast ~2 kHz block rate); the
         # GUI windows this down to a few seconds via history(seconds=...).
@@ -78,6 +83,7 @@ class Pipeline:
         with self._lock:
             frame = self._frame
             frame_at = self._frame_at
+            test = self._test
         fresh = frame is not None and (time.perf_counter() - frame_at) * 1000.0 <= self.cfg.stale_ms
         use = frame if (frame is not None) else _IDLE_FRAME
         live = fresh and use.on_track and not use.paused
@@ -85,11 +91,25 @@ class Pipeline:
             # bench mode: run the effects against whatever telemetry we have
             from dataclasses import replace as _replace
             use = _replace(use, on_track=True, paused=False)
+        t0 = 0.0
+        if test is not None:
+            if test[1] is None:           # first block of this test
+                test[1] = self._sample_idx
+                test[0].reset()           # on this thread, not the GUI's
+            t0 = (self._sample_idx - test[1]) / fs
+            if t0 >= test[2]:
+                with self._lock:
+                    if self._test is test:
+                        self._test = None
+                test = None
         want_enable = 1.0 if (live or self.cfg.force_enable) else 0.0
 
         dt = n / fs
-        ramp = dt / max(1e-3, self.cfg.enable_ramp_ms / 1000.0)
-        self._enable += max(-ramp, min(ramp, want_enable - self._enable))
+        if test is not None:
+            self._enable = 1.0            # no fade-in: it would eat a short thump
+        else:
+            ramp = dt / max(1e-3, self.cfg.enable_ramp_ms / 1000.0)
+            self._enable += max(-ramp, min(ramp, want_enable - self._enable))
 
         ctx = EffectContext(
             fs=fs, n=n, dt=dt, t=self._sample_idx / fs, frame=use, rng=self.rng
@@ -101,7 +121,18 @@ class Pipeline:
         for e in self.effects:
             kinds[e.id] = e.kind
             duckable[e.id] = e.duckable
-            b = e.render(ctx) if e.enabled else e.silent(n)
+            if test is not None:
+                # solo: only the tested effect sounds, whatever its "on" box says
+                if e is test[0]:
+                    tctx = EffectContext(
+                        fs=fs, n=n, dt=dt, t=ctx.t, rng=self.rng,
+                        frame=e.test_frame(use, t0, t0 + dt),
+                    )
+                    b = e.render(tctx)
+                else:
+                    b = e.silent(n)
+            else:
+                b = e.render(ctx) if e.enabled else e.silent(n)
             if b.signal.size:
                 b.signal = np.clip(b.signal, 0.0, 1.0).astype(np.float32, copy=False)
                 b.level = float(np.max(b.signal))
@@ -125,6 +156,8 @@ class Pipeline:
             effect_levels={k: (v if v == v else 0.0) for k, v in out.effect_levels.items()},
             telemetry_fresh=fresh,
             blocks=self._meters.blocks + 1,
+            testing=test[0].id if test is not None else "",
+            test_remaining_s=max(0.0, test[2] - t0) if test is not None else 0.0,
         )
         if sig.size:
             self._history.append((self._sample_idx / fs, float(sig[-1])))
@@ -149,10 +182,13 @@ class Pipeline:
         out.reverse()
         return out
 
-    def trigger_test(self, effect_id: str) -> None:
-        """GUI 'Test' button — nudge an effect's telemetry-independent trigger."""
+    def trigger_test(self, effect_id: str) -> bool:
+        """GUI 'Test' button: solo-play one effect for its ``test_duration_s``
+        against a synthetic frame that makes it fire — independent of its "on"
+        box, the live telemetry and the on-track gate. False if no such effect."""
         for e in self.effects:
-            if e.id == effect_id and hasattr(e, "_env"):
-                env = e._env
-                if hasattr(env, "trigger"):
-                    env.trigger(3.0, 20.0, 90.0, 0.9)
+            if e.id == effect_id:
+                with self._lock:
+                    self._test = [e, None, e.test_duration_s]
+                return True
+        return False

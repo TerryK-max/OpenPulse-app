@@ -191,9 +191,10 @@ class BoxController:
         self._stream_kind = "engine"
         self._streamer.start()
 
-    def trigger_effect_test(self, effect_id: str) -> None:
-        if self._pipeline is not None:
-            self._pipeline.trigger_test(effect_id)
+    def trigger_effect_test(self, effect_id: str) -> bool:
+        """False when the engine isn't running (nothing to play it through)."""
+        pipe = self._pipeline
+        return pipe is not None and pipe.trigger_test(effect_id)
 
     def stop_stream(self) -> None:
         if self._streamer is not None:

@@ -5,6 +5,7 @@ suspension, plus a crunchy texture on top.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -20,6 +21,11 @@ class KerbEffect(Effect):
     def reset(self) -> None:
         self._noise: BandNoise | None = None
         self._env = Smoother(60.0)
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        v = self.p.susp_vel_thr + self.p.susp_vel_range      # full-scale intensity
+        return replace(f, on_track=True, paused=False, susp_vel_ms=(v, v, 0.0, 0.0),
+                       caps=f.caps | Cap.SUSP_TRAVEL_ABS)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

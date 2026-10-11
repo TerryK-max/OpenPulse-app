@@ -93,3 +93,53 @@ def test_real_lap_through_pipeline():
     rms = (ms_sum / m) ** 0.5
     assert peak <= 1.0
     assert 0.05 < rms < 0.6      # audible but not pinned
+
+
+# --------------------------------------------------------------------------- #
+#  GUI "Test" button: solo-play one effect, regardless of its box / telemetry
+# --------------------------------------------------------------------------- #
+from openpulse.engine.registry import EFFECT_CLASSES  # noqa: E402
+
+
+def _run_test(effect_id: str, *, disable: bool = True):
+    s = AppSettings()
+    pipe = Pipeline(s.engine)
+    if disable:
+        for cls in EFFECT_CLASSES:                 # everything unchecked
+            getattr(s.engine.effects, cls.id).enabled = False
+    assert pipe.trigger_test(effect_id)
+    peaks, levels, testing = [], {}, []
+    # no telemetry frame at all: the idle frame, not on track
+    for _ in range(int(5.0 * FS / BLOCK)):
+        sig = pipe.generate(BLOCK, FS)
+        m = pipe.meters()
+        peaks.append(float(sig.max()))
+        testing.append(m.testing)
+        for k, v in m.effect_levels.items():
+            levels[k] = max(levels.get(k, 0.0), v)
+    return np.array(peaks), levels, testing
+
+
+@pytest.mark.parametrize("cls", EFFECT_CLASSES, ids=lambda c: c.id)
+def test_effect_test_button_plays_that_effect_alone(cls):
+    peaks, levels, testing = _run_test(cls.id)
+    assert peaks.max() > 0.05, f"{cls.id}: Test produced no output"
+    # solo: nothing else contributed
+    others = {k: v for k, v in levels.items() if k != cls.id}
+    assert all(v == 0.0 for v in others.values()), others
+    # it announces itself, then stops by itself
+    assert testing[0] == cls.id and testing[-1] == ""
+    assert peaks[-50:].max() == 0.0
+
+
+def test_effect_test_unknown_id():
+    pipe = Pipeline(AppSettings().engine)
+    assert pipe.trigger_test("nope") is False
+
+
+def test_effect_test_leaves_normal_path_alone():
+    s = AppSettings()
+    pipe = Pipeline(s.engine)
+    # not on track, no test -> silent as before
+    out = np.concatenate([pipe.generate(BLOCK, FS) for _ in range(100)])
+    assert out.max() == 0.0

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from openpulse.engine.dsp import Osc, Smoother
@@ -17,6 +19,14 @@ class EngineRpmEffect(Effect):
         self._osc = Osc()
         self._freq = Smoother(8.0, 6.0)
         self._level = Smoother(10.0)
+
+    test_duration_s = 2.5
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        # sweep idle -> redline so both the throb frequency and its swell are felt
+        sweep = min(1.0, t0 / 2.0)
+        return replace(f, on_track=True, paused=False, rpm_max=8000.0,
+                       rpm=8000.0 * (0.25 + 0.75 * sweep), throttle=0.8)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

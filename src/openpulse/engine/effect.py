@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -36,6 +36,8 @@ class Effect(abc.ABC):
     #: if True the mixer attenuates this effect when something requests a duck
     #: (the ambient road/engine bed); grip_scrub and events set this False
     duckable: bool = False
+    #: seconds the GUI "Test" button keeps this effect firing
+    test_duration_s: float = 1.5
 
     def __init__(self, params) -> None:  # noqa: ANN001 - concrete pydantic model per effect
         self.p = params
@@ -50,6 +52,16 @@ class Effect(abc.ABC):
 
     @abc.abstractmethod
     def render(self, ctx: EffectContext) -> EffectBlock: ...
+
+    def test_frame(self, f: TelemetryFrame, t0: float, t1: float) -> TelemetryFrame:
+        """``f`` edited so this effect fires — what the GUI "Test" button feeds it.
+
+        The block covers [t0, t1) seconds since the test started; single-frame
+        edges (a gear change, an impact) must fire only in the block that
+        contains their time. Override per effect; the default just forces the
+        car "on track".
+        """
+        return replace(f, on_track=True, paused=False)
 
     # -- helpers ------------------------------------------------------------ #
     @staticmethod

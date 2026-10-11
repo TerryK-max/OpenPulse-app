@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from openpulse.engine.dsp import Osc, Smoother
@@ -15,6 +17,9 @@ class RevLimiterEffect(Effect):
     def reset(self) -> None:
         self._osc = Osc()
         self._env = Smoother(120.0)
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        return replace(f, on_track=True, paused=False, rev_limiter=True)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

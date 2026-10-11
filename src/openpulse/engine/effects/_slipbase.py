@@ -5,6 +5,7 @@ axle, driving a rough gated oscillator with a release tail.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -40,6 +41,18 @@ class SlipEventEffect(Effect):
             if not math.isfinite(r):
                 return 0.0
             return max(0.0, min(1.5, (r - p.lock_ratio_thr) / max(1e-3, p.lock_ratio_range)))
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        p = self.p
+        if self._direction == "under":      # lockup: front wheels dragging under braking
+            lock = p.lock_ratio_thr - p.lock_ratio_range
+            ratios = (lock, lock, 1.0, 1.0) if self._front else (1.0, 1.0, lock, lock)
+            return replace(f, on_track=True, paused=False, lock_ratio=ratios,
+                           brake=max(f.brake, 1.0, p.brake_min))
+        spin = p.lock_ratio_thr + p.lock_ratio_range    # wheelspin: rear over-rotating
+        ratios = (1.0, 1.0, spin, spin) if not self._front else (spin, spin, 1.0, 1.0)
+        return replace(f, on_track=True, paused=False, lock_ratio=ratios,
+                       throttle=max(f.throttle, 1.0, p.throttle_min))
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         p = self.p

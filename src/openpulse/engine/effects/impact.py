@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from openpulse.engine.dsp import OneShot
@@ -17,6 +19,12 @@ class ImpactEffect(Effect):
         self._prev_impact = 0.0
         self._prev_damage = 0.0
         self._cool_until = -1e9
+
+    test_duration_s = 1.0
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        g = self.p.ref_g if t0 <= 0.0 < t1 else 0.0
+        return replace(f, on_track=True, paused=False, impact_g=g)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

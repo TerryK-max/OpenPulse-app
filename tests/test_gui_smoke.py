@@ -78,6 +78,18 @@ def test_gui_builds_and_streams():
         # a param slider must write through too
         _dpg_dispatch("fx_grip_scrub__ceiling", 0.9)
         assert eff.grip_scrub.ceiling == pytest.approx(0.9)
+
+        # the Test button (road is unchecked above) plays the effect solo anyway
+        btn = next(i for i in dpg.get_all_items()
+                   if dpg.get_item_user_data(i) == "rev_limiter"
+                   and dpg.get_item_type(i) == "mvAppItemType::mvButton")
+        _dpg_dispatch(btn, None)
+        seen = 0.0
+        for _ in range(40):
+            gui.update()
+            dpg.render_dearpygui_frame()
+            seen = max(seen, pipe.meters().effect_levels.get("rev_limiter", 0.0))
+        assert seen > 0.05
     finally:
         gui.controller.disconnect()
         gui.telem.stop()

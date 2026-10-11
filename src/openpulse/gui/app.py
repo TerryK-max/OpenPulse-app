@@ -263,6 +263,9 @@ class OpenPulseGui:
         with dpg.window(tag="effects", label="Effects", pos=(916, 8), width=390, height=560):
             dpg.add_text("value after each name = live contribution meter (0..1)",
                          color=(150, 150, 150), wrap=370)
+            dpg.add_text("Test = solo-play that effect for a moment (works even if its box is "
+                         "unchecked and with no telemetry)", color=(150, 150, 150), wrap=370)
+            dpg.add_text("", tag="fx_test_status", wrap=370)
             for cls in EFFECT_CLASSES:
                 model = getattr(eff, cls.id)
                 with dpg.collapsing_header(label=f"{cls.id}  ({cls.kind})", tag=f"fx_hdr_{cls.id}"):
@@ -282,7 +285,10 @@ class OpenPulseGui:
         getattr(self.settings.engine.effects, user_data).enabled = bool(app_data)
 
     def _on_effect_test(self, sender, app_data, user_data) -> None:
-        self.controller.trigger_effect_test(user_data)
+        if not self.controller.trigger_effect_test(user_data):
+            dpg.set_value("fx_test_status", "Test needs the effect engine running: Connect the box, "
+                                            "then press 'Effect engine' (Telemetry window).")
+            dpg.configure_item("fx_test_status", color=(230, 110, 110))
 
     def _build_mixer(self) -> None:
         with dpg.window(tag="mixer", label="Mixer / output", pos=(916, 576), width=380, height=310):
@@ -412,10 +418,15 @@ class OpenPulseGui:
             f"thermal {m.thermal_gain:.2f} (E {m.thermal_energy:.3f})"
             + ("" if m.telemetry_fresh else "  [telemetry stale]"),
         )
+        if m.testing:
+            dpg.set_value("fx_test_status", f"testing {m.testing} ... {m.test_remaining_s:.1f} s")
+            dpg.configure_item("fx_test_status", color=(230, 160, 90))
+        else:
+            dpg.set_value("fx_test_status", "")
         eff_cfg = self.settings.engine.effects
         for cid, lvl in m.effect_levels.items():
             if dpg.does_item_exist(f"fx_meter_{cid}"):
-                on = getattr(eff_cfg, cid).enabled
+                on = getattr(eff_cfg, cid).enabled or m.testing == cid
                 dpg.set_value(f"fx_meter_{cid}", f"{lvl:.2f}" if on else "off")
                 dpg.configure_item(f"fx_meter_{cid}",
                                    color=(150, 150, 150) if not on else

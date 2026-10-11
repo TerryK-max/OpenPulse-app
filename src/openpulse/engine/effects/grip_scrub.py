@@ -9,6 +9,7 @@ can be shaped independently of the Deriver threshold.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -29,6 +30,15 @@ class GripScrubEffect(Effect):
         if not math.isfinite(raw):
             return 0.0
         return smoothstep(self.p.in_lo, self.p.in_hi, raw) ** self.p.curve
+
+    test_duration_s = 4.0
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        # triangle 0 -> 1 -> 0: lets you feel the whole in_lo..in_hi / curve slope
+        x = t0 / self.test_duration_s
+        tri = 1.0 - abs(2.0 * min(1.0, x) - 1.0)
+        return replace(f, on_track=True, paused=False,
+                       grip_scrub=tri, grip_scrub_front=tri, grip_scrub_rear=tri)
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

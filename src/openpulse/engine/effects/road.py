@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -19,6 +20,9 @@ class RoadEffect(Effect):
     def reset(self) -> None:
         self._noise: BandNoise | None = None
         self._level = Smoother(6.0)
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        return replace(f, on_track=True, paused=False, speed_ms=max(f.speed_ms, self.p.speed_ref_ms))
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from openpulse.engine.dsp import Osc, Smoother
@@ -15,6 +17,10 @@ class TcCutEffect(Effect):
     def reset(self) -> None:
         self._osc = Osc()
         self._env = Smoother(50.0)
+
+    def test_frame(self, f, t0, t1):  # noqa: ANN001
+        return replace(f, on_track=True, paused=False, tc_active=True,
+                       throttle=max(f.throttle, 1.0, self.p.throttle_min))
 
     def render(self, ctx: EffectContext) -> EffectBlock:
         f = ctx.frame
